@@ -19,3 +19,6 @@ resume
 
 # JetBrains IDE project files
 .idea/
+
+# VS Code local project settings
+.vscode/
