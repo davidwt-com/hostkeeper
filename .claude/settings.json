@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./check.sh)",
+      "Bash(./check-detailed.sh)",
+      "Bash(./mark-mail-read.sh)",
+      "Bash(./install-local.sh)",
+      "Bash(./verify-install.sh)",
+      "Bash(./connect.sh)"
+    ],
+    "deny": [
+      "Bash(*install-remote.sh*)",
+      "Bash(*visudo*)",
+      "Bash(*/etc/sudoers*)",
+      "Bash(*authorized_keys*)",
+      "Bash(*ssh-keygen*)",
+      "Bash(*useradd*)",
+      "Bash(*passwd*)"
+    ]
+  }
+}

@@ -1,0 +1,3 @@
+# Installed by install-remote.sh to /etc/sudoers.d/claude-maint.
+# The account below is granted NOPASSWD for exactly one command.
+__USER__ ALL=(root) NOPASSWD: /usr/local/sbin/claude-maint

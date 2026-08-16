@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+# /usr/local/sbin/claude-maint
+#
+# Single controlled entry point for the passwordless-sudo maintenance
+# workflow. This is the ONLY command that should ever appear in a NOPASSWD
+# sudoers line for this purpose.
+#
+# CRITICAL: never make this a passthrough (no `sudo "$@"`, no `bash -c "$*"`,
+# no `eval`). Every action must be an explicit case below with its own
+# whitelist. Anything not listed here is refused.
+#
+# Ownership/perms this file MUST have (install-remote.sh sets these):
+#   chown root:root /usr/local/sbin/claude-maint
+#   chmod 755 /usr/local/sbin/claude-maint
+# If the user calling this can write to this file, the whole design is void.
+
+set -euo pipefail
+
+LOG=/var/log/claude-maint.log
+CALLER="$(logname 2>/dev/null || whoami)"
+
+log() {
+  echo "$(date -Is) [${CALLER}] $*" >> "$LOG"
+}
+
+# Services this script is allowed to touch at all. Add to this list
+# deliberately, one at a time, not with a wildcard.
+# e.g. ALLOWED_SERVICES=(nginx docker)
+ALLOWED_SERVICES=()
+
+# Docker containers this script is allowed to touch. Same rule: add
+# deliberately, by exact name, never a wildcard.
+# e.g. ALLOWED_CONTAINERS=(web worker)
+ALLOWED_CONTAINERS=()
+
+is_allowed_service() {
+  local svc="$1"
+  for s in "${ALLOWED_SERVICES[@]}"; do
+    [[ "$svc" == "$s" ]] && return 0
+  done
+  return 1
+}
+
+is_allowed_container() {
+  local c="$1"
+  for x in "${ALLOWED_CONTAINERS[@]}"; do
+    [[ "$c" == "$x" ]] && return 0
+  done
+  return 1
+}
+
+# Compose projects this script is allowed to touch, mapped to their fixed
+# directory (must contain the docker-compose.yml). Only the key is ever
+# taken from user input — the path is never user-supplied, so there's no
+# way to point this at an arbitrary directory.
+# e.g. COMPOSE_PROJECTS=([app]="/srv/app")
+declare -A COMPOSE_PROJECTS=()
+
+is_allowed_compose_project() {
+  [[ -n "${COMPOSE_PROJECTS[$1]+x}" ]]
+}
+
+# For any optional service-name argument passed into docker/compose: must be
+# a plain token, and specifically must not start with "-", so it can never
+# be interpreted as a flag by docker/docker compose.
+is_safe_token() {
+  [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]] && [[ "$1" != -* ]]
+}
+
+ACTION="${1:-}"
+shift || true
+
+case "$ACTION" in
+
+  status)
+    svc="${1:-}"
+    is_allowed_service "$svc" || { echo "refused: unlisted service '$svc'" >&2; exit 1; }
+    log "status $svc"
+    systemctl status "$svc" --no-pager
+    ;;
+
+  restart)
+    svc="${1:-}"
+    is_allowed_service "$svc" || { echo "refused: unlisted service '$svc'" >&2; exit 1; }
+    log "restart $svc"
+    systemctl restart "$svc"
+    ;;
+
+  logs)
+    svc="${1:-}"
+    is_allowed_service "$svc" || { echo "refused: unlisted service '$svc'" >&2; exit 1; }
+    lines="${2:-100}"
+    [[ "$lines" =~ ^[0-9]+$ ]] || lines=100
+    log "logs $svc ($lines lines)"
+    journalctl -u "$svc" -n "$lines" --no-pager
+    ;;
+
+  disk)
+    log "disk"
+    df -h
+    ;;
+
+  auth-log)
+    lines="${1:-20}"
+    [[ "$lines" =~ ^[0-9]+$ ]] || lines=20
+    log "auth-log ($lines lines)"
+    # Auth events (sshd, sudo, su, login, PAM) live in the journal under the
+    # authpriv facility (SYSLOG_FACILITY=10) on systems with no auth.log.
+    journalctl SYSLOG_FACILITY=10 -n "$lines" --no-pager
+    ;;
+
+  docker-ps)
+    log "docker-ps"
+    docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+    ;;
+
+  docker-logs)
+    c="${1:-}"
+    is_allowed_container "$c" || { echo "refused: unlisted container '$c'" >&2; exit 1; }
+    lines="${2:-100}"
+    [[ "$lines" =~ ^[0-9]+$ ]] || lines=100
+    log "docker-logs $c ($lines lines)"
+    docker logs --tail "$lines" "$c"
+    ;;
+
+  docker-restart)
+    c="${1:-}"
+    is_allowed_container "$c" || { echo "refused: unlisted container '$c'" >&2; exit 1; }
+    log "docker-restart $c"
+    docker restart "$c"
+    ;;
+
+  docker-stats)
+    log "docker-stats"
+    docker stats --no-stream
+    ;;
+
+  apt-upgrade)
+    log "apt-upgrade"
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get -y upgrade
+    ;;
+
+  ufw-status)
+    log "ufw-status"
+    ufw status verbose
+    ;;
+
+  fail2ban-status)
+    log "fail2ban-status"
+    for jail in $(fail2ban-client status | sed -n 's/.*Jail list:[[:space:]]*//p' | tr ',' ' '); do
+      fail2ban-client status "$jail"
+    done
+    ;;
+
+  apparmor-status)
+    log "apparmor-status"
+    aa-status
+    ;;
+
+  mail-queue)
+    log "mail-queue"
+    mailq
+    ;;
+
+  compose-ps)
+    proj="${1:-}"
+    is_allowed_compose_project "$proj" || { echo "refused: unlisted compose project '$proj'" >&2; exit 1; }
+    log "compose-ps $proj"
+    (cd "${COMPOSE_PROJECTS[$proj]}" && docker compose ps)
+    ;;
+
+  compose-logs)
+    proj="${1:-}"
+    is_allowed_compose_project "$proj" || { echo "refused: unlisted compose project '$proj'" >&2; exit 1; }
+    svc="${2:-}"
+    lines="${3:-100}"
+    [[ "$lines" =~ ^[0-9]+$ ]] || lines=100
+    if [[ -n "$svc" ]]; then
+      is_safe_token "$svc" || { echo "refused: bad service token" >&2; exit 1; }
+      log "compose-logs $proj $svc ($lines lines)"
+      (cd "${COMPOSE_PROJECTS[$proj]}" && docker compose logs --tail "$lines" "$svc")
+    else
+      log "compose-logs $proj (all services, $lines lines)"
+      (cd "${COMPOSE_PROJECTS[$proj]}" && docker compose logs --tail "$lines")
+    fi
+    ;;
+
+  compose-restart)
+    proj="${1:-}"
+    is_allowed_compose_project "$proj" || { echo "refused: unlisted compose project '$proj'" >&2; exit 1; }
+    svc="${2:-}"
+    if [[ -n "$svc" ]]; then
+      is_safe_token "$svc" || { echo "refused: bad service token" >&2; exit 1; }
+      log "compose-restart $proj $svc"
+      (cd "${COMPOSE_PROJECTS[$proj]}" && docker compose restart "$svc")
+    else
+      log "compose-restart $proj (whole stack)"
+      (cd "${COMPOSE_PROJECTS[$proj]}" && docker compose restart)
+    fi
+    ;;
+
+  *)
+    echo "refused: unknown action '$ACTION'" >&2
+    echo "allowed actions: status|restart|logs|disk|auth-log|docker-ps|docker-logs|docker-restart|docker-stats|apt-upgrade|compose-ps|compose-logs|compose-restart|ufw-status|fail2ban-status|apparmor-status|mail-queue" >&2
+    log "REFUSED unknown action: $ACTION $*"
+    exit 1
+    ;;
+esac

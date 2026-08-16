@@ -1,0 +1,21 @@
+.superpowers/
+
+# Host-specific config — never commit.
+.env
+remote/claude-maint
+
+# Stale pre-restructure copy at repo root — contains real whitelist data.
+/claude-maint
+
+# Personal / machine-local Claude Code settings.
+.claude/settings.local.json
+
+# Runtime state, not config.
+*.sock
+
+# Pre-existing local clutter from before this repo was templated.
+archive/
+resume
+
+# JetBrains IDE project files
+.idea/
