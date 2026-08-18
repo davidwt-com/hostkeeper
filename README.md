@@ -118,6 +118,10 @@ If you fork this, keep the same discipline: your own `.env` and
 and service/container whitelists shouldn't end up in your fork's tracked
 files, commit messages, or PR descriptions either.
 
+`main` on the upstream repo is protected — changes land via pull request
+from a fork branch, not direct push. See `CONTRIBUTING.md` for the
+fork → branch → PR flow.
+
 ## Claude Code
 
 `.claude/settings.json` ships a small `allow` list for this repo's own
