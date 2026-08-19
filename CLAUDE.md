@@ -61,19 +61,30 @@ the remote host.
    - `claude-maint restart <service>`
    - `claude-maint logs <service> [lines]`
    - `claude-maint disk`
+   - `claude-maint ports`
    - `claude-maint auth-log [lines]`
    - `claude-maint docker-ps`
    - `claude-maint docker-logs <container> [lines]`
    - `claude-maint docker-restart <container>`
    - `claude-maint docker-stats`
+   - `claude-maint docker-disk`
    - `claude-maint apt-upgrade`
+   - `claude-maint cert-expiry <container>`
    - `claude-maint compose-ps <project>`
    - `claude-maint compose-logs <project> [service] [lines]`
    - `claude-maint compose-restart <project> [service]`
+   - `claude-maint compose-images <project>`
+   - `claude-maint compose-backup <project>`
+   - `claude-maint compose-update <project> confirm`
    - `claude-maint ufw-status`
    - `claude-maint fail2ban-status`
    - `claude-maint apparmor-status`
    - `claude-maint mail-queue`
+
+   `compose-update` rewrites what is running and takes a backup on the way
+   through, so it is destructive by rule 2 — ask before every single run,
+   and never pass `confirm` on the user's behalf without an explicit
+   go-ahead for that specific run.
 
    `<service>` and `<container>` must be on the whitelists inside the
    script. `<project>` must be a key in the script's `COMPOSE_PROJECTS` map.
