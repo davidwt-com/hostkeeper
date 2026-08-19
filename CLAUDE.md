@@ -74,6 +74,7 @@ the remote host.
    - `claude-maint compose-logs <project> [service] [lines]`
    - `claude-maint compose-restart <project> [service]`
    - `claude-maint compose-images <project>`
+   - `claude-maint compose-config <project>` (secret-bearing values masked)
    - `claude-maint compose-backup <project>`
    - `claude-maint compose-update <project> confirm`
    - `claude-maint ufw-status`

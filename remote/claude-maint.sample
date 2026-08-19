@@ -132,6 +132,13 @@ do_compose_backup() {
     [[ -f "${dir}/${f}" ]] && paths+=("${dir}/${f}")
   done
 
+  # env_file entries are read by the compose CLI rather than mounted, so
+  # neither sweep above sees them. They are named freely (dashboard.env,
+  # proxy.env, ...), so take every .env file beside the compose file.
+  for f in "${dir}"/*.env; do
+    [[ -f "$f" ]] && paths+=("$f")
+  done
+
   if [[ ${#paths[@]} -eq 0 ]]; then
     echo "refused: found nothing to back up for project '$proj'" >&2
     return 1
@@ -414,9 +421,77 @@ case "$ACTION" in
     (cd "$dir" && docker compose ps)
     ;;
 
+  compose-config)
+    proj="${1:-}"
+    is_allowed_compose_project "$proj" || { echo "refused: unlisted compose project '$proj'" >&2; exit 1; }
+    log "compose-config $proj"
+    dir="${COMPOSE_PROJECTS[$proj]}"
+
+    # Print the project's config as text, with secret-bearing values masked.
+    # Masking is done here, in root-owned code, so the caller never gets to
+    # choose what is redacted. Two independent rules, both applied:
+    #   1. any key whose name looks secret-bearing loses its value
+    #   2. any long opaque token is blanked whatever its key is called
+    # Rule 2 is the backstop for a secret under a key name rule 1 misses.
+    # Over-masking is the intended failure mode.
+    mask() {
+      sed -E \
+        -e 's/^([[:space:]]*"?[A-Za-z0-9_.-]*([Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww]?[Oo]?[Rr]?[Dd]?|[Tt][Oo][Kk][Ee][Nn]|[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]|[Aa][Pp][Ii]_?[Kk][Ee][Yy]|[Ee][Nn][Cc][Rr][Yy][Pp][Tt][Ii][Oo][Nn]_?[Kk][Ee][Yy]|[Pp][Rr][Ii][Vv][Aa][Tt][Ee]_?[Kk][Ee][Yy]|[Ss][Aa][Ll][Tt]|[Dd][Ss][Nn]|[Kk][Ee][Yy])[A-Za-z0-9_.-]*"?[[:space:]]*[:=][[:space:]]*).*$/\1***MASKED***/' \
+        -e 's/^([[:space:]]*"?[Kk][Ee][Yy][Ss]?"?[[:space:]]*[:=][[:space:]]*).*$/\1***MASKED***/' \
+        -e 's/[A-Za-z0-9+-]{28,}/***MASKED***/g'
+    }
+
+    # Same discovery the backup uses, narrowed to regular files: bind mounts
+    # under the project directory, plus compose/env files beside them.
+    declare -a cfgs=()
+    while IFS= read -r p; do
+      [[ -n "$p" && -f "$p" ]] || continue
+      [[ "$p" == "$dir"/* ]] || continue
+      cfgs+=("$p")
+    done < <(
+      cd "$dir" && docker compose ps -qa | while read -r cid; do
+        [[ -n "$cid" ]] || continue
+        docker inspect "$cid" --format \
+          '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{"\n"}}{{end}}{{end}}'
+      done | sort -u
+    )
+    for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml setup.env .env; do
+      [[ -f "${dir}/${f}" ]] && cfgs+=("${dir}/${f}")
+    done
+    for f in "${dir}"/*.env; do
+      [[ -f "$f" ]] && cfgs+=("$f")
+    done
+
+    if [[ ${#cfgs[@]} -eq 0 ]]; then
+      echo "no config files found for project '$proj'" >&2
+      exit 1
+    fi
+
+    mapfile -t cfgs < <(printf '%s\n' "${cfgs[@]}" | sort -u)
+    echo "### values are masked by ${0##*/}; treat anything shown as non-secret only"
+    echo
+    for f in "${cfgs[@]}"; do
+      # Text only, and bounded, so this can't dump a binary or a huge blob.
+      if ! grep -Iq . "$f" 2>/dev/null; then
+        echo "===== $f  (skipped: not text) ====="
+        echo
+        continue
+      fi
+      sz="$(stat -c %s "$f")"
+      if [[ "$sz" -gt 262144 ]]; then
+        echo "===== $f  (skipped: ${sz} bytes exceeds 256K cap) ====="
+        echo
+        continue
+      fi
+      echo "===== $f  (${sz} bytes) ====="
+      mask < "$f"
+      echo
+    done
+    ;;
+
   *)
     echo "refused: unknown action '$ACTION'" >&2
-    echo "allowed actions: status|restart|logs|disk|ports|auth-log|docker-ps|docker-logs|docker-restart|docker-stats|docker-disk|apt-upgrade|cert-expiry|compose-ps|compose-logs|compose-restart|compose-images|compose-backup|compose-update|ufw-status|fail2ban-status|apparmor-status|mail-queue" >&2
+    echo "allowed actions: status|restart|logs|disk|ports|auth-log|docker-ps|docker-logs|docker-restart|docker-stats|docker-disk|apt-upgrade|cert-expiry|compose-ps|compose-logs|compose-restart|compose-images|compose-config|compose-backup|compose-update|ufw-status|fail2ban-status|apparmor-status|mail-queue" >&2
     log "REFUSED unknown action: $ACTION $*"
     exit 1
     ;;
