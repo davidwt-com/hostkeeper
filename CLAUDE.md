@@ -76,6 +76,7 @@ the remote host.
    - `claude-maint compose-images <project>`
    - `claude-maint compose-config <project>` (secret-bearing values masked)
    - `claude-maint compose-backup <project>`
+   - `claude-maint compose-up <project> confirm [service]`
    - `claude-maint compose-update <project> confirm`
    - `claude-maint ufw-status`
    - `claude-maint fail2ban-status`
@@ -85,7 +86,16 @@ the remote host.
    `compose-update` rewrites what is running and takes a backup on the way
    through, so it is destructive by rule 2 — ask before every single run,
    and never pass `confirm` on the user's behalf without an explicit
-   go-ahead for that specific run.
+   go-ahead for that specific run. The same applies to `compose-up`, which
+   recreates containers so that edits to the compose/env files take effect;
+   it never pulls and never backs up, so it is the narrower of the two, but
+   it still rewrites running state.
+
+   `compose-restart` only restarts existing containers. A container's
+   environment and mounts are fixed when it is created, so changes to
+   `docker-compose.yml` or an `env_file` need `compose-up`, not
+   `compose-restart`. Edits to a bind-mounted config file the process
+   re-reads at startup do only need `compose-restart`.
 
    `<service>` and `<container>` must be on the whitelists inside the
    script. `<project>` must be a key in the script's `COMPOSE_PROJECTS` map.

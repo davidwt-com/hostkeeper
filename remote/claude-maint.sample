@@ -62,6 +62,10 @@ BACKUP_ROOT=/var/backups/hostkeeper
 BACKUP_KEEP=5
 
 is_allowed_compose_project() {
+  # Guard the empty case first: ${COMPOSE_PROJECTS[]+x} is a syntax error on
+  # an associative array, so a missing project name would abort with a bash
+  # error instead of the refusal message.
+  [[ -n "${1:-}" ]] || return 1
   [[ -n "${COMPOSE_PROJECTS[$1]+x}" ]]
 }
 
@@ -388,6 +392,49 @@ case "$ACTION" in
     do_compose_backup "$proj"
     ;;
 
+  compose-up)
+    proj="${1:-}"
+    is_allowed_compose_project "$proj" || { echo "refused: unlisted compose project '$proj'" >&2; exit 1; }
+    # Applies the project's current compose/env files to what is running.
+    # A container's environment and mounts are fixed at creation, so an
+    # edited docker-compose.yml only takes effect once the container is
+    # recreated -- compose-restart reuses it and will not do this.
+    # Recreation rewrites running state, so it takes the same literal
+    # "confirm" compose-update does. Unlike compose-update it never pulls:
+    # the images already on disk are the images that come back.
+    if [[ "${2:-}" != "confirm" ]]; then
+      echo "refused: compose-up needs the literal argument 'confirm'" >&2
+      echo "usage: claude-maint compose-up $proj confirm [service]" >&2
+      log "REFUSED compose-up $proj (no confirm)"
+      exit 1
+    fi
+    svc="${3:-}"
+    declare -a svcarg=()
+    if [[ -n "$svc" ]]; then
+      is_safe_token "$svc" || { echo "refused: bad service token" >&2; exit 1; }
+      svcarg=("$svc")
+    fi
+    dir="${COMPOSE_PROJECTS[$proj]}"
+    log "compose-up $proj ${svc:-(whole stack)}"
+    echo "==> no pull and no backup: images, named volumes and config files"
+    echo "    are all left as they are; only containers may be recreated"
+    echo
+    # compose's own progress lines are past-tense ("Recreated", "Started")
+    # and invent a hash-prefixed container name, so a raw dry run reads
+    # exactly like a real one. Its wording isn't configurable, so mark
+    # every line instead. Progress goes to stderr, hence the 2>&1.
+    echo "==> planned changes (simulated — nothing below actually runs)"
+    (cd "$dir" && docker compose up -d --dry-run "${svcarg[@]}" 2>&1 \
+       | sed 's/^/  [dry-run] /') \
+      || echo "(dry-run preview unavailable on this compose version)"
+    echo
+    echo "==> applying"
+    (cd "$dir" && docker compose up -d "${svcarg[@]}")
+    echo
+    echo "==> current state"
+    (cd "$dir" && docker compose ps)
+    ;;
+
   compose-update)
     proj="${1:-}"
     is_allowed_compose_project "$proj" || { echo "refused: unlisted compose project '$proj'" >&2; exit 1; }
@@ -491,7 +538,7 @@ case "$ACTION" in
 
   *)
     echo "refused: unknown action '$ACTION'" >&2
-    echo "allowed actions: status|restart|logs|disk|ports|auth-log|docker-ps|docker-logs|docker-restart|docker-stats|docker-disk|apt-upgrade|cert-expiry|compose-ps|compose-logs|compose-restart|compose-images|compose-config|compose-backup|compose-update|ufw-status|fail2ban-status|apparmor-status|mail-queue" >&2
+    echo "allowed actions: status|restart|logs|disk|ports|auth-log|docker-ps|docker-logs|docker-restart|docker-stats|docker-disk|apt-upgrade|cert-expiry|compose-ps|compose-logs|compose-restart|compose-images|compose-config|compose-backup|compose-up|compose-update|ufw-status|fail2ban-status|apparmor-status|mail-queue" >&2
     log "REFUSED unknown action: $ACTION $*"
     exit 1
     ;;
