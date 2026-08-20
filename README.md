@@ -92,11 +92,41 @@ Code, this warning is the entire control.
 
 ## Updating the wrapper
 
-Edit `remote/claude-maint` locally → `scp` it to the remote home
-directory → on the host, run `sudo install -o root -g root -m 755
-~/claude-maint <REMOTE_MAINT_PATH>` yourself. This step stays
-human-run and passworded on purpose — never automated — so an agent
-session can never silently change what the wrapper is allowed to do.
+Edit `remote/claude-maint` locally, stage it in the remote home
+directory, then install it yourself. Staging is safe to automate — the
+copy lands in your own home as an ordinary file and is inert until
+installed:
+
+```bash
+source ./ssh-lib.sh && hostkeeper_ssh "cat > ~/claude-maint.new" < remote/claude-maint
+```
+
+The install is not. Run it yourself, in your own terminal:
+
+```bash
+source .env && ssh -t "$SSH_ALIAS" \
+  "sudo install -o root -g root -m 755 ~/claude-maint.new '$REMOTE_MAINT_PATH' \
+   && rm -f ~/claude-maint.new"
+```
+
+Both commands are host-agnostic: `SSH_ALIAS` and `REMOTE_MAINT_PATH`
+come from `.env`, and `~` expands to whatever the SSH user's home is.
+The `.new` suffix keeps the inbound copy visibly distinct from the
+installed wrapper, and the `rm` stops a stale one lingering in the home
+directory looking authoritative.
+
+Verify afterwards by comparing checksums — they must match:
+
+```bash
+sha256sum remote/claude-maint
+source ./ssh-lib.sh && hostkeeper_ssh "sha256sum '$REMOTE_MAINT_PATH'"
+```
+
+The install step stays human-run and passworded on purpose — never
+automated, and never granted NOPASSWD — so an agent session can never
+silently change what the wrapper is allowed to do. Granting NOPASSWD on
+the command that writes the wrapper would hand back exactly the
+unrestricted root the whitelist exists to prevent.
 
 ## Security model
 

@@ -56,7 +56,16 @@ is_allowed_container() {
 # e.g. COMPOSE_PROJECTS=([app]="/srv/app")
 declare -A COMPOSE_PROJECTS=()
 
+# Where compose-backup writes archives, and how many to keep per project.
+# Root-owned, 0700 — backups contain whatever the stack's volumes hold.
+BACKUP_ROOT=/var/backups/hostkeeper
+BACKUP_KEEP=5
+
 is_allowed_compose_project() {
+  # Guard the empty case first: ${COMPOSE_PROJECTS[]+x} is a syntax error on
+  # an associative array, so a missing project name would abort with a bash
+  # error instead of the refusal message.
+  [[ -n "${1:-}" ]] || return 1
   [[ -n "${COMPOSE_PROJECTS[$1]+x}" ]]
 }
 
@@ -65,6 +74,114 @@ is_allowed_compose_project() {
 # be interpreted as a flag by docker/docker compose.
 is_safe_token() {
   [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]] && [[ "$1" != -* ]]
+}
+
+# Back up one compose project: every named volume its containers use, plus
+# the compose/env files sitting in the project directory. Used by both the
+# compose-backup action and the backup step inside compose-update. The
+# project name is always validated by the caller before this runs.
+do_compose_backup() {
+  local proj="$1"
+  local dir="${COMPOSE_PROJECTS[$proj]}"
+  local dest="${BACKUP_ROOT}/${proj}"
+  local out="${dest}/$(date +%Y%m%d-%H%M%S).tar.gz"
+  local -a vols=() paths=() keep=() old=()
+  local v p f a b rc skip
+
+  install -d -o root -g root -m 700 "$dest"
+
+  while IFS= read -r v; do
+    [[ -n "$v" ]] && vols+=("$v")
+  done < <(
+    cd "$dir" && docker compose ps -qa | while read -r cid; do
+      [[ -n "$cid" ]] || continue
+      docker inspect "$cid" --format \
+        '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}'
+    done | sort -u
+  )
+
+  # A stopped stack still has containers, so discovery must include them
+  # (compose-update deliberately stops before backing up). Losing this is
+  # how a backup silently degrades to config-only.
+  if [[ ${#vols[@]} -eq 0 ]]; then
+    echo "warning: no named volumes found for '$proj' — archiving config only" >&2
+  fi
+
+  for v in "${vols[@]}"; do
+    p="$(docker volume inspect "$v" --format '{{.Mountpoint}}' 2>/dev/null || true)"
+    [[ -n "$p" && -d "$p" ]] && paths+=("$p")
+  done
+
+  # Bind-mounted config the stack depends on but no named volume holds
+  # (management.json, turnserver.conf, per-service env files, ...). Only
+  # sources under the project directory are taken: a bind mount from
+  # outside it (docker.sock, /etc/localtime, ...) is system state, not
+  # this project's data, and has no business in a project backup.
+  while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+    [[ "$p" == "$dir" || "$p" == "$dir"/* ]] || continue
+    [[ -e "$p" ]] && paths+=("$p")
+  done < <(
+    cd "$dir" && docker compose ps -qa | while read -r cid; do
+      [[ -n "$cid" ]] || continue
+      docker inspect "$cid" --format \
+        '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{"\n"}}{{end}}{{end}}'
+    done | sort -u
+  )
+
+  # Compose/env files sitting in the project directory. These are usually
+  # read by the compose CLI rather than mounted, so the sweep above misses
+  # them.
+  for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml setup.env .env; do
+    [[ -f "${dir}/${f}" ]] && paths+=("${dir}/${f}")
+  done
+
+  # env_file entries are read by the compose CLI rather than mounted, so
+  # neither sweep above sees them. They are named freely (dashboard.env,
+  # proxy.env, ...), so take every .env file beside the compose file.
+  for f in "${dir}"/*.env; do
+    [[ -f "$f" ]] && paths+=("$f")
+  done
+
+  if [[ ${#paths[@]} -eq 0 ]]; then
+    echo "refused: found nothing to back up for project '$proj'" >&2
+    return 1
+  fi
+
+  # Drop duplicates, then anything already covered by an ancestor path, so
+  # a file mounted by two containers (or a directory and a file inside it)
+  # is archived exactly once.
+  mapfile -t paths < <(printf '%s\n' "${paths[@]}" | sort -u)
+  for a in "${paths[@]}"; do
+    skip=0
+    for b in "${paths[@]}"; do
+      [[ "$a" == "$b" ]] && continue
+      [[ "$a" == "$b"/* ]] && { skip=1; break; }
+    done
+    [[ $skip -eq 0 ]] && keep+=("$a")
+  done
+  paths=("${keep[@]}")
+
+  echo "archiving ${#paths[@]} path(s) -> ${out}"
+  printf '  %s\n' "${paths[@]}"
+  # tar strips the leading "/" itself, so restores can't clobber system paths
+  # by accident. Exit 1 is "file changed while reading" — tolerable on a live
+  # stack; anything higher is a real failure.
+  rc=0
+  tar -czf "$out" "${paths[@]}" 2>/dev/null || rc=$?
+  if [[ $rc -gt 1 ]]; then
+    echo "backup failed (tar exit $rc)" >&2
+    rm -f "$out"
+    return 1
+  fi
+  chmod 600 "$out"
+  ls -lh "$out" | awk '{print "wrote: " $9 " (" $5 ")"}'
+
+  mapfile -t old < <(ls -1t "${dest}"/*.tar.gz 2>/dev/null | tail -n +$((BACKUP_KEEP + 1)))
+  if [[ ${#old[@]} -gt 0 ]]; then
+    echo "pruning ${#old[@]} backup(s) beyond the newest ${BACKUP_KEEP}"
+    rm -f "${old[@]}"
+  fi
 }
 
 ACTION="${1:-}"
@@ -200,9 +317,228 @@ case "$ACTION" in
     fi
     ;;
 
+  ports)
+    log "ports"
+    ss -tulnp
+    ;;
+
+  docker-disk)
+    log "docker-disk"
+    docker system df
+    echo
+    docker system df -v | awk '/^Local Volumes space usage:/{p=1} p'
+    ;;
+
+  compose-images)
+    proj="${1:-}"
+    is_allowed_compose_project "$proj" || { echo "refused: unlisted compose project '$proj'" >&2; exit 1; }
+    log "compose-images $proj"
+    (
+      cd "${COMPOSE_PROJECTS[$proj]}"
+      for cid in $(docker compose ps -qa); do
+        svc="$(docker inspect "$cid" --format '{{index .Config.Labels "com.docker.compose.service"}}')"
+        img="$(docker inspect "$cid" --format '{{.Image}}')"
+        tags="$(docker image inspect "$img" --format '{{if .RepoTags}}{{join .RepoTags ", "}}{{else}}<untagged>{{end}}')"
+        digest="$(docker image inspect "$img" --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}<none>{{end}}')"
+        built="$(docker image inspect "$img" --format '{{.Created}}')"
+        printf 'service : %s\n  tags   : %s\n  digest : %s\n  built  : %s\n\n' \
+          "$svc" "$tags" "$digest" "${built%%T*}"
+      done
+    )
+    ;;
+
+  cert-expiry)
+    c="${1:-}"
+    is_allowed_container "$c" || { echo "refused: unlisted container '$c'" >&2; exit 1; }
+    log "cert-expiry $c"
+    # Find the ACME store on the host side of this container's mounts. Only
+    # domains and expiry dates are ever printed — never the account key or
+    # the private key material stored alongside the certificates.
+    store=""
+    while IFS= read -r src; do
+      [[ -n "$src" ]] || continue
+      cand=""
+      if [[ -f "$src" && "$src" == *.json ]]; then
+        cand="$src"
+      elif [[ -d "$src" ]]; then
+        cand="$(find "$src" -maxdepth 2 -type f -name 'acme*.json' 2>/dev/null | head -1)"
+      fi
+      if [[ -n "$cand" ]] && jq -e '..|.Certificates? // empty' "$cand" >/dev/null 2>&1; then
+        store="$cand"
+        break
+      fi
+    done < <(docker inspect "$c" --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}')
+
+    if [[ -z "$store" ]]; then
+      echo "no ACME certificate store found in the mounts for '$c'" >&2
+      exit 1
+    fi
+
+    echo "store: $store"
+    printf '%-45s %s\n' DOMAIN EXPIRES
+    jq -r '..|.Certificates? // empty | .[] | "\(.domain.main)\t\(.certificate)"' "$store" |
+      while IFS=$'\t' read -r domain cert; do
+        [[ -n "$cert" && "$cert" != "null" ]] || continue
+        enddate="$(printf '%s' "$cert" | base64 -d 2>/dev/null |
+          openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)"
+        printf '%-45s %s\n' "$domain" "${enddate:-<unreadable>}"
+      done
+    ;;
+
+  compose-backup)
+    proj="${1:-}"
+    is_allowed_compose_project "$proj" || { echo "refused: unlisted compose project '$proj'" >&2; exit 1; }
+    log "compose-backup $proj"
+    do_compose_backup "$proj"
+    ;;
+
+  compose-up)
+    proj="${1:-}"
+    is_allowed_compose_project "$proj" || { echo "refused: unlisted compose project '$proj'" >&2; exit 1; }
+    # Applies the project's current compose/env files to what is running.
+    # A container's environment and mounts are fixed at creation, so an
+    # edited docker-compose.yml only takes effect once the container is
+    # recreated -- compose-restart reuses it and will not do this.
+    # Recreation rewrites running state, so it takes the same literal
+    # "confirm" compose-update does. Unlike compose-update it never pulls:
+    # the images already on disk are the images that come back.
+    if [[ "${2:-}" != "confirm" ]]; then
+      echo "refused: compose-up needs the literal argument 'confirm'" >&2
+      echo "usage: claude-maint compose-up $proj confirm [service]" >&2
+      log "REFUSED compose-up $proj (no confirm)"
+      exit 1
+    fi
+    svc="${3:-}"
+    declare -a svcarg=()
+    if [[ -n "$svc" ]]; then
+      is_safe_token "$svc" || { echo "refused: bad service token" >&2; exit 1; }
+      svcarg=("$svc")
+    fi
+    dir="${COMPOSE_PROJECTS[$proj]}"
+    log "compose-up $proj ${svc:-(whole stack)}"
+    echo "==> no pull and no backup: images, named volumes and config files"
+    echo "    are all left as they are; only containers may be recreated"
+    echo
+    # compose's own progress lines are past-tense ("Recreated", "Started")
+    # and invent a hash-prefixed container name, so a raw dry run reads
+    # exactly like a real one. Its wording isn't configurable, so mark
+    # every line instead. Progress goes to stderr, hence the 2>&1.
+    echo "==> planned changes (simulated — nothing below actually runs)"
+    (cd "$dir" && docker compose up -d --dry-run "${svcarg[@]}" 2>&1 \
+       | sed 's/^/  [dry-run] /') \
+      || echo "(dry-run preview unavailable on this compose version)"
+    echo
+    echo "==> applying"
+    (cd "$dir" && docker compose up -d "${svcarg[@]}")
+    echo
+    echo "==> current state"
+    (cd "$dir" && docker compose ps)
+    ;;
+
+  compose-update)
+    proj="${1:-}"
+    is_allowed_compose_project "$proj" || { echo "refused: unlisted compose project '$proj'" >&2; exit 1; }
+    # Requires a literal "confirm" so this can never fire by accident.
+    if [[ "${2:-}" != "confirm" ]]; then
+      echo "refused: compose-update needs the literal argument 'confirm'" >&2
+      echo "usage: claude-maint compose-update $proj confirm" >&2
+      log "REFUSED compose-update $proj (no confirm)"
+      exit 1
+    fi
+    dir="${COMPOSE_PROJECTS[$proj]}"
+    log "compose-update $proj (pull, stop, backup, up -d)"
+    echo "==> pulling images"
+    (cd "$dir" && docker compose pull)
+    echo
+    echo "==> stopping stack"
+    (cd "$dir" && docker compose stop)
+    echo
+    echo "==> backing up while stopped (consistent copy)"
+    if ! do_compose_backup "$proj"; then
+      echo "backup failed — restarting the stack unchanged and aborting" >&2
+      (cd "$dir" && docker compose up -d)
+      log "compose-update $proj ABORTED (backup failed)"
+      exit 1
+    fi
+    echo
+    echo "==> starting stack on the pulled images"
+    (cd "$dir" && docker compose up -d)
+    echo
+    echo "==> current state"
+    (cd "$dir" && docker compose ps)
+    ;;
+
+  compose-config)
+    proj="${1:-}"
+    is_allowed_compose_project "$proj" || { echo "refused: unlisted compose project '$proj'" >&2; exit 1; }
+    log "compose-config $proj"
+    dir="${COMPOSE_PROJECTS[$proj]}"
+
+    # Print the project's config as text, with secret-bearing values masked.
+    # Masking is done here, in root-owned code, so the caller never gets to
+    # choose what is redacted. Two independent rules, both applied:
+    #   1. any key whose name looks secret-bearing loses its value
+    #   2. any long opaque token is blanked whatever its key is called
+    # Rule 2 is the backstop for a secret under a key name rule 1 misses.
+    # Over-masking is the intended failure mode.
+    mask() {
+      sed -E \
+        -e 's/^([[:space:]]*"?[A-Za-z0-9_.-]*([Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww]?[Oo]?[Rr]?[Dd]?|[Tt][Oo][Kk][Ee][Nn]|[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]|[Aa][Pp][Ii]_?[Kk][Ee][Yy]|[Ee][Nn][Cc][Rr][Yy][Pp][Tt][Ii][Oo][Nn]_?[Kk][Ee][Yy]|[Pp][Rr][Ii][Vv][Aa][Tt][Ee]_?[Kk][Ee][Yy]|[Ss][Aa][Ll][Tt]|[Dd][Ss][Nn]|[Kk][Ee][Yy])[A-Za-z0-9_.-]*"?[[:space:]]*[:=][[:space:]]*).*$/\1***MASKED***/' \
+        -e 's/^([[:space:]]*"?[Kk][Ee][Yy][Ss]?"?[[:space:]]*[:=][[:space:]]*).*$/\1***MASKED***/' \
+        -e 's/[A-Za-z0-9+-]{28,}/***MASKED***/g'
+    }
+
+    # Same discovery the backup uses, narrowed to regular files: bind mounts
+    # under the project directory, plus compose/env files beside them.
+    declare -a cfgs=()
+    while IFS= read -r p; do
+      [[ -n "$p" && -f "$p" ]] || continue
+      [[ "$p" == "$dir"/* ]] || continue
+      cfgs+=("$p")
+    done < <(
+      cd "$dir" && docker compose ps -qa | while read -r cid; do
+        [[ -n "$cid" ]] || continue
+        docker inspect "$cid" --format \
+          '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{"\n"}}{{end}}{{end}}'
+      done | sort -u
+    )
+    for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml setup.env .env; do
+      [[ -f "${dir}/${f}" ]] && cfgs+=("${dir}/${f}")
+    done
+    for f in "${dir}"/*.env; do
+      [[ -f "$f" ]] && cfgs+=("$f")
+    done
+
+    if [[ ${#cfgs[@]} -eq 0 ]]; then
+      echo "no config files found for project '$proj'" >&2
+      exit 1
+    fi
+
+    mapfile -t cfgs < <(printf '%s\n' "${cfgs[@]}" | sort -u)
+    echo "### values are masked by ${0##*/}; treat anything shown as non-secret only"
+    echo
+    for f in "${cfgs[@]}"; do
+      # Text only, and bounded, so this can't dump a binary or a huge blob.
+      if ! grep -Iq . "$f" 2>/dev/null; then
+        echo "===== $f  (skipped: not text) ====="
+        echo
+        continue
+      fi
+      sz="$(stat -c %s "$f")"
+      if [[ "$sz" -gt 262144 ]]; then
+        echo "===== $f  (skipped: ${sz} bytes exceeds 256K cap) ====="
+        echo
+        continue
+      fi
+      echo "===== $f  (${sz} bytes) ====="
+      mask < "$f"
+      echo
+    done
+    ;;
+
   *)
     echo "refused: unknown action '$ACTION'" >&2
-    echo "allowed actions: status|restart|logs|disk|auth-log|docker-ps|docker-logs|docker-restart|docker-stats|apt-upgrade|compose-ps|compose-logs|compose-restart|ufw-status|fail2ban-status|apparmor-status|mail-queue" >&2
+    echo "allowed actions: status|restart|logs|disk|ports|auth-log|docker-ps|docker-logs|docker-restart|docker-stats|docker-disk|apt-upgrade|cert-expiry|compose-ps|compose-logs|compose-restart|compose-images|compose-config|compose-backup|compose-up|compose-update|ufw-status|fail2ban-status|apparmor-status|mail-queue" >&2
     log "REFUSED unknown action: $ACTION $*"
     exit 1
     ;;
