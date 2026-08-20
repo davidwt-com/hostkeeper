@@ -2,10 +2,15 @@
 
 # Host-specific config — never commit.
 .env
-remote/claude-maint
 
-# Stale pre-restructure copy at repo root — contains real whitelist data.
-/claude-maint
+# The real wrapper and every copy of it, at any depth: remote/claude-maint,
+# a claude-maint.new left behind by an interrupted install, a stale copy at
+# the repo root, editor backups. All of them carry real whitelist data, so
+# match by name rather than by exact path.
+claude-maint*
+# ...except the tracked templates, which hold no host specifics and must
+# stay committed (remote/claude-maint.sample, claude-maint.sudoers.sample).
+!claude-maint*.sample
 
 # Personal / machine-local Claude Code settings.
 .claude/settings.local.json
