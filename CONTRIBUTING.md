@@ -1,7 +1,14 @@
 # Contributing
 
-Changes land on `main` via pull request, not direct push — for the
-maintainer as much as for anyone else.
+Changes land on `main` via pull request, not direct push. A ruleset on
+the default branch enforces this: pull request required, no force-push,
+no deletion. Merges are squash-only, so your branch arrives as a single
+commit — put the detail in the PR description, not in a tidy commit
+series that will not survive.
+
+Organization admins keep a bypass on that ruleset. Treat the PR flow as
+how work is done here, not as something that is physically impossible to
+route around.
 
 How you get a branch in front of a PR depends on whether you have write
 access to the upstream repo. Pick the route that matches:
@@ -58,10 +65,10 @@ git push -u origin my-change
 gh pr create --repo <owner>/<repo> --base main --head my-change
 ```
 
-Protecting `main` does not prevent this. Branch protection applies to the
-branches its rules name, so a rule on `main` stops pushes to `main` — it
-has never stopped you pushing `my-change`. The PR requirement is about
-what merges into `main`, not about where feature branches live.
+The ruleset on `main` does not prevent this. It targets the default
+branch, so it governs pushes to `main` — it has never stopped you pushing
+`my-change`. The PR requirement is about what merges into `main`, not
+about where feature branches live.
 
 Two things to keep in mind on this route. The branch is visible in the
 upstream repo the moment you push, so on a public repo treat the push
