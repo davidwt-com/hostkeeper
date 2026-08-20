@@ -148,9 +148,11 @@ If you fork this, keep the same discipline: your own `.env` and
 and service/container whitelists shouldn't end up in your fork's tracked
 files, commit messages, or PR descriptions either.
 
-`main` on the upstream repo is protected — changes land via pull request
-from a fork branch, not direct push. See `CONTRIBUTING.md` for the
-fork → branch → PR flow.
+`main` on the upstream repo is protected — pull request required,
+squash-only merges, no force-push or deletion. How you get a branch in
+front of a PR depends on whether you have write access: fork if you
+don't, branch directly if you do. See `CONTRIBUTING.md` for both routes,
+and for what to do if you cloned rather than forked.
 
 ## Claude Code
 

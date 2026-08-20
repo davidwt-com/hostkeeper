@@ -1,8 +1,27 @@
 # Contributing
 
-`main` on the upstream repo is protected: changes land via pull request,
-not direct push (this applies to the maintainer too — there's no admin
-bypass). The flow is the standard fork-and-PR pattern:
+Changes land on `main` via pull request, not direct push. A ruleset on
+the default branch enforces this: pull request required, no force-push,
+no deletion. Merges are squash-only, so your branch arrives as a single
+commit — put the detail in the PR description, not in a tidy commit
+series that will not survive.
+
+Organization admins keep a bypass on that ruleset. Treat the PR flow as
+how work is done here, not as something that is physically impossible to
+route around.
+
+How you get a branch in front of a PR depends on whether you have write
+access to the upstream repo. Pick the route that matches:
+
+- **No write access** (almost everyone) → [Route A: fork](#route-a-fork)
+- **Write access** (maintainers) → [Route B: branch directly](#route-b-branch-directly)
+- Already cloned instead of forking? → [If you cloned instead of forking](#if-you-cloned-instead-of-forking)
+
+## Route A: fork
+
+Without write access you cannot push a branch to upstream at all — the
+push is rejected. Fork instead. A fork is what makes GitHub accept a pull
+request from one repo into another, so this is not busywork.
 
 1. **Fork** the upstream repo to your own account/org (once).
 2. **Clone your fork**, and add the upstream repo as a second remote:
@@ -34,6 +53,55 @@ bypass). The flow is the standard fork-and-PR pattern:
    git push origin main
    ```
 
+## Route B: branch directly
+
+With write access, skip the fork. Push the branch to the upstream repo
+and open the PR within it — `--head` is a plain branch name, with no
+account prefix, because there is only one repo involved:
+
+```
+git switch -c my-change main
+git push -u origin my-change
+gh pr create --repo <owner>/<repo> --base main --head my-change
+```
+
+The ruleset on `main` does not prevent this. It targets the default
+branch, so it governs pushes to `main` — it has never stopped you pushing
+`my-change`. The PR requirement is about what merges into `main`, not
+about where feature branches live.
+
+Two things to keep in mind on this route. The branch is visible in the
+upstream repo the moment you push, so on a public repo treat the push
+itself as publication and check the diff before it, not after. And you
+lose the fork's accidental safety net: on Route A a mistake lands in your
+own repo first.
+
+## If you cloned instead of forking
+
+Cloning and forking produce identical-looking local checkouts, but only a
+fork is registered with GitHub as related to upstream. Push a branch to a
+plain clone and the PR will be refused, because GitHub sees two unrelated
+repos.
+
+Check which you have:
+
+```
+gh repo view <your-account>/<repo> --json isFork,parent
+```
+
+`"isFork": false` with `"parent": null` means it is a clone, not a fork.
+To fix it, create a real fork and push the branch there:
+
+```
+gh repo fork <owner>/<repo> --clone=false
+git remote set-url origin <your-fork-url>
+git push -u origin my-change
+```
+
+If your clone-based repo already occupies the name the fork wants, either
+give the fork another name with `--fork-name`, or rename/remove the old
+repo first.
+
 ## Same hygiene rules apply to PRs
 
 This repo's core discipline — see `CLAUDE.md` and the README's "Repo
@@ -42,6 +110,14 @@ description: no real hostnames, usernames, or service/container whitelist
 entries in anything tracked or in PR text. Keep `.env` and
 `remote/claude-maint` out of every commit; they're gitignored for exactly
 this reason.
+
+Worth an explicit scan before you push a branch to a public repo, since a
+push cannot be taken back:
+
+```
+git diff upstream/main...HEAD
+git log upstream/main..HEAD --format='%s%n%b'
+```
 
 ## Never run the install scripts in a shared/hosted session
 
