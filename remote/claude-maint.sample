@@ -76,6 +76,14 @@ is_safe_token() {
   [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]] && [[ "$1" != -* ]]
 }
 
+# For the path argument to container-http-probe: must start with "/",
+# contain only safe URL-path characters, and never a ".." segment — so it
+# can only ever address a sub-path of whatever the probed container's own
+# HTTP server routes, never traverse outside it.
+is_safe_path() {
+  [[ "$1" == /* ]] && [[ "$1" =~ ^[A-Za-z0-9_./-]+$ ]] && [[ "$1" != *..* ]]
+}
+
 # Back up one compose project: every named volume its containers use, plus
 # the compose/env files sitting in the project directory. Used by both the
 # compose-backup action and the backup step inside compose-update. The
@@ -250,6 +258,42 @@ case "$ACTION" in
   docker-stats)
     log "docker-stats"
     docker stats --no-stream
+    ;;
+
+  container-health)
+    c="${1:-}"
+    is_allowed_container "$c" || { echo "refused: unlisted container '$c'" >&2; exit 1; }
+    log "container-health $c"
+    # Empty when the image/compose file defines no HEALTHCHECK at all —
+    # that's a normal, common case, not an error.
+    status="$(docker inspect "$c" --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' 2>/dev/null)"
+    echo "${status:-no healthcheck defined for '$c'}"
+    ;;
+
+  container-http-probe)
+    c="${1:-}"
+    is_allowed_container "$c" || { echo "refused: unlisted container '$c'" >&2; exit 1; }
+    port="${2:-}"
+    path="${3:-/}"
+    [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) \
+      || { echo "refused: bad port '$port'" >&2; exit 1; }
+    is_safe_path "$path" || { echo "refused: bad path '$path'" >&2; exit 1; }
+    # Reaches a container's own internal-only ports (never published to the
+    # host) via its docker-network IP, which the host can always route to
+    # directly — no published port and no extra image pull required. Meant
+    # for a container's own health/metrics endpoint, not general HTTP access:
+    # <port>/<path> are still whitelisted-container-scoped, never arbitrary.
+    ip="$(docker inspect "$c" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null)"
+    [[ -n "$ip" ]] || { echo "refused: could not determine a network address for '$c'" >&2; exit 1; }
+    log "container-http-probe $c $port $path"
+    tmp="$(mktemp)"
+    code="$(curl -s -m 5 -o "$tmp" -w '%{http_code}' "http://${ip}:${port}${path}" 2>/dev/null || echo 000)"
+    echo "HTTP ${code}"
+    # Capped: this hits an operator-facing status/metrics endpoint, not a
+    # general file reader.
+    head -c 65536 "$tmp"
+    echo
+    rm -f "$tmp"
     ;;
 
   apt-upgrade)
@@ -538,7 +582,7 @@ case "$ACTION" in
 
   *)
     echo "refused: unknown action '$ACTION'" >&2
-    echo "allowed actions: status|restart|logs|disk|ports|auth-log|docker-ps|docker-logs|docker-restart|docker-stats|docker-disk|apt-upgrade|cert-expiry|compose-ps|compose-logs|compose-restart|compose-images|compose-config|compose-backup|compose-up|compose-update|ufw-status|fail2ban-status|apparmor-status|mail-queue" >&2
+    echo "allowed actions: status|restart|logs|disk|ports|auth-log|docker-ps|docker-logs|docker-restart|docker-stats|docker-disk|container-health|container-http-probe|apt-upgrade|cert-expiry|compose-ps|compose-logs|compose-restart|compose-images|compose-config|compose-backup|compose-up|compose-update|ufw-status|fail2ban-status|apparmor-status|mail-queue" >&2
     log "REFUSED unknown action: $ACTION $*"
     exit 1
     ;;

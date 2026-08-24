@@ -34,3 +34,8 @@ hostkeeper_ssh '
   " /var/mail/'"$MAIL_USER"' 2>/dev/null || echo 0
   echo; echo "== last 5 auth log lines =="; sudo '"$REMOTE_MAINT_PATH"' auth-log 5
 '
+
+# Optional, personal, gitignored: source ./check.local.sh if you've created
+# one, e.g. to append a one-line summary for a compose project you run.
+# See check.local.sh.sample for the pattern.
+[[ -f ./check.local.sh ]] && source ./check.local.sh
