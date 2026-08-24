@@ -275,15 +275,21 @@ case "$ACTION" in
     is_allowed_container "$c" || { echo "refused: unlisted container '$c'" >&2; exit 1; }
     port="${2:-}"
     path="${3:-/}"
-    [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) \
-      || { echo "refused: bad port '$port'" >&2; exit 1; }
+    [[ "$port" =~ ^[0-9]+$ ]] || { echo "refused: bad port '$port'" >&2; exit 1; }
+    # Force base 10: bash arithmetic reads a leading-zero string as octal, so
+    # without this "010" would validate as decimal and then probe port 8.
+    port=$((10#$port))
+    (( port >= 1 && port <= 65535 )) || { echo "refused: bad port '$port'" >&2; exit 1; }
     is_safe_path "$path" || { echo "refused: bad path '$path'" >&2; exit 1; }
     # Reaches a container's own internal-only ports (never published to the
     # host) via its docker-network IP, which the host can always route to
     # directly — no published port and no extra image pull required. Meant
     # for a container's own health/metrics endpoint, not general HTTP access:
     # <port>/<path> are still whitelisted-container-scoped, never arbitrary.
-    ip="$(docker inspect "$c" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null)"
+    # One line per network, first non-empty wins: a container attached to two
+    # networks would otherwise concatenate both addresses into one garbage
+    # string ("172.18.0.2172.19.0.3").
+    ip="$(docker inspect "$c" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{"\n"}}{{end}}' 2>/dev/null | grep -m1 . || true)"
     [[ -n "$ip" ]] || { echo "refused: could not determine a network address for '$c'" >&2; exit 1; }
     log "container-http-probe $c $port $path"
     tmp="$(mktemp)"

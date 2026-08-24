@@ -75,4 +75,6 @@ hostkeeper_ssh "sudo $REMOTE_MAINT_PATH docker-ps"
 # Optional, personal, gitignored: source ./check.local.sh if you've created
 # one, e.g. to append the same one-line summary check.sh shows, or more.
 # See check.local.sh.sample for the pattern.
-[[ -f ./check.local.sh ]] && source ./check.local.sh
+if [[ -f ./check.local.sh ]]; then
+  source ./check.local.sh
+fi

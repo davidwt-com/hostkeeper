@@ -38,4 +38,6 @@ hostkeeper_ssh '
 # Optional, personal, gitignored: source ./check.local.sh if you've created
 # one, e.g. to append a one-line summary for a compose project you run.
 # See check.local.sh.sample for the pattern.
-[[ -f ./check.local.sh ]] && source ./check.local.sh
+if [[ -f ./check.local.sh ]]; then
+  source ./check.local.sh
+fi
