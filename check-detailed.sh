@@ -71,3 +71,10 @@ hostkeeper_ssh "sudo $REMOTE_MAINT_PATH docker-ps"
 # here for your own project key, e.g.:
 #   echo; echo "== <project> compose stack =="
 #   hostkeeper_ssh "sudo $REMOTE_MAINT_PATH compose-ps <project>"
+
+# Optional, personal, gitignored: source ./check.local.sh if you've created
+# one, e.g. to append the same one-line summary check.sh shows, or more.
+# See check.local.sh.sample for the pattern.
+if [[ -f ./check.local.sh ]]; then
+  source ./check.local.sh
+fi

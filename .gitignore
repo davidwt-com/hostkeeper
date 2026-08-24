@@ -12,6 +12,13 @@ claude-maint*
 # stay committed (remote/claude-maint.sample, claude-maint.sudoers.sample).
 !claude-maint*.sample
 
+# Any personal, host/service-specific script (e.g. a detailed status report
+# for whatever you actually run, or a local hook check.sh/check-detailed.sh
+# source if present) — same reasoning as claude-maint*: real names, real
+# endpoints, real tokens. Only the generic *.sample template stays tracked.
+*.local.sh
+!*.local.sh.sample
+
 # Personal / machine-local Claude Code settings.
 .claude/settings.local.json
 

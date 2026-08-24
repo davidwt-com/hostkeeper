@@ -68,6 +68,8 @@ the remote host.
    - `claude-maint docker-restart <container>`
    - `claude-maint docker-stats`
    - `claude-maint docker-disk`
+   - `claude-maint container-health <container>`
+   - `claude-maint container-http-probe <container> <port> [path]`
    - `claude-maint apt-upgrade`
    - `claude-maint cert-expiry <container>`
    - `claude-maint compose-ps <project>`
@@ -96,6 +98,12 @@ the remote host.
    `docker-compose.yml` or an `env_file` need `compose-up`, not
    `compose-restart`. Edits to a bind-mounted config file the process
    re-reads at startup do only need `compose-restart`.
+
+   `container-http-probe` reaches a container's own internal-only port
+   (never published to the host) via its docker-network IP — for a
+   container's own health/metrics endpoint, not general HTTP access;
+   `<port>` must be numeric and `<path>` must start with `/` with no `..`
+   segment.
 
    `<service>` and `<container>` must be on the whitelists inside the
    script. `<project>` must be a key in the script's `COMPOSE_PROJECTS` map.

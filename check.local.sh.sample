@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Example check.local.sh — copy to check.local.sh (gitignored, never
+# committed) and fill in your own project/container names.
+#
+# check.sh and check-detailed.sh both `source` check.local.sh at the very
+# end, if it exists — so this runs in the same shell they're already
+# running in: ssh-lib.sh is already sourced, $REMOTE_MAINT_PATH and
+# hostkeeper_ssh() are already available. Don't `set -e`/`exec` here, and
+# don't re-source ssh-lib.sh yourself.
+#
+# This example appends one summary line for a single compose project. Add
+# as many lines or sections as you like — container health, cert expiry,
+# a call to the app's own REST API, etc.
+
+PROJECT=myapp   # a key in remote/claude-maint's COMPOSE_PROJECTS
+
+echo
+echo "== $PROJECT summary =="
+hostkeeper_ssh "sudo $REMOTE_MAINT_PATH compose-ps $PROJECT" | tail -n +2 | awk '
+  { total++; if ($0 ~ /Up/) up++ }
+  END { print total+0 " container(s), " up+0 " up" }
+'

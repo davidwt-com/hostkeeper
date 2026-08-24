@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Example detailed status script for one self-hosted app/compose project.
+# Copy to <yourapp>-status.local.sh (gitignored, never committed — the
+# *.local.sh suffix is what keeps it out of git; see .gitignore) and fill
+# in your own project/container names and API details.
+#
+# Run standalone (./<yourapp>-status.local.sh), separately from
+# check.sh/check-detailed.sh — a "how's this one app doing" deep-dive, not
+# part of the routine host snapshot. Add a one-line summary mode of your
+# own (e.g. an --summary flag) if you also want a line for check.local.sh
+# to pull in.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+source ./ssh-lib.sh
+
+PROJECT=myapp                 # a key in remote/claude-maint's COMPOSE_PROJECTS
+CONTAINER=myapp-server         # a name in remote/claude-maint's ALLOWED_CONTAINERS
+
+echo "== $PROJECT: containers =="
+hostkeeper_ssh "sudo $REMOTE_MAINT_PATH compose-ps $PROJECT"
+
+echo; echo "== $CONTAINER: container-level health =="
+hostkeeper_ssh "sudo $REMOTE_MAINT_PATH container-health $CONTAINER"
+
+# If the app exposes its own internal health/metrics endpoint on a port
+# that isn't published to the host (common for anything meant to sit
+# behind a reverse proxy), container-http-probe reaches it directly by the
+# container's docker-network IP. Adjust port/path to match your app.
+echo; echo "== $CONTAINER: internal health endpoint =="
+hostkeeper_ssh "sudo $REMOTE_MAINT_PATH container-http-probe $CONTAINER 9000 /health" || true
+
+echo; echo "== $CONTAINER: recent error/warn log lines =="
+hostkeeper_ssh "sudo $REMOTE_MAINT_PATH compose-logs $PROJECT '' 200" | grep -iE 'error|warn' || echo "(none in the last 200 lines)"
+
+echo; echo "== TLS cert expiry =="
+hostkeeper_ssh "sudo $REMOTE_MAINT_PATH cert-expiry $CONTAINER" || true
+
+# If your app has its own token-authed REST API (reachable over the
+# public internet, not through SSH), call it directly from here rather
+# than through the wrapper — the wrapper is for root-on-the-host actions
+# only. Keep the URL/token in your local .env, never in this file or any
+# tracked file.
+#
+#   : "${MYAPP_API_URL:?MYAPP_API_URL is empty in .env}"
+#   : "${MYAPP_API_TOKEN:?MYAPP_API_TOKEN is empty in .env}"
+#   echo; echo "== $PROJECT: API-reported status =="
+#   curl -s -H "Authorization: Token $MYAPP_API_TOKEN" "$MYAPP_API_URL/api/status"
+#
+# If the app's API has its own version/update-check endpoint (many
+# self-hosted dashboards do -- it's usually the same source their own "an
+# update is available" banner reads from), prefer that over comparing
+# versions against GitHub releases yourself:
+#
+#   echo; echo "== $PROJECT: version / update status =="
+#   curl -s -H "Authorization: Token $MYAPP_API_TOKEN" "$MYAPP_API_URL/api/version" | jq .
