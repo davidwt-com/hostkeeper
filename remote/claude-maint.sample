@@ -16,6 +16,19 @@
 
 set -euo pipefail
 
+# Fixed command search path, set before anything is run. Every command below
+# is invoked unqualified (docker, tar, systemctl, ls, rm ...), so whoever
+# controls PATH controls what those names actually resolve to -- a writable
+# directory earlier in PATH is arbitrary code execution as root, and it
+# defeats the whitelist without touching it. sudo's own env_reset plus a
+# `Defaults secure_path=...` in /etc/sudoers normally strips the caller's
+# PATH before this script starts, but that is a property of the host's
+# sudoers config, not of this script: it can be absent, overridden by a
+# later Defaults line, or bypassed entirely if the script is ever invoked
+# by some other route. Setting it here makes the wrapper self-contained
+# rather than dependent on configuration it does not own.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
 LOG=/var/log/claude-maint.log
 CALLER="$(logname 2>/dev/null || whoami)"
 
