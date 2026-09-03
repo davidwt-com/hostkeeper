@@ -78,6 +78,8 @@ the remote host.
    - `claude-maint compose-images <project>`
    - `claude-maint compose-config <project>` (secret-bearing values masked)
    - `claude-maint compose-backup <project>`
+   - `claude-maint compose-backup-ls <project>`
+   - `claude-maint compose-backup-rm <project> <archive> confirm`
    - `claude-maint compose-up <project> confirm [service]`
    - `claude-maint compose-update <project> confirm`
    - `claude-maint ufw-status`
@@ -92,6 +94,18 @@ the remote host.
    recreates containers so that edits to the compose/env files take effect;
    it never pulls and never backs up, so it is the narrower of the two, but
    it still rewrites running state.
+
+   `compose-backup-rm` permanently deletes one archive, so it is
+   destructive by rule 2 on the same terms as the two above — ask first,
+   and never pass `confirm` without a go-ahead for that specific archive.
+   `<archive>` is a bare `YYYYMMDD-HHMMSS.tar.gz` basename as printed by
+   `compose-backup-ls`; a path, a glob, or any other shape is refused.
+
+   `compose-backup-ls` is read-only. It lists a project's archives
+   newest-first and ends with the count against `BACKUP_KEEP` and how many
+   the next backup will prune — use it to pick the argument for
+   `compose-backup-rm`, and to check retention without writing a new
+   archive.
 
    `compose-restart` only restarts existing containers. A container's
    environment and mounts are fixed when it is created, so changes to
