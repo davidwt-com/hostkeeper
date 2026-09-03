@@ -16,6 +16,19 @@
 
 set -euo pipefail
 
+# Fixed command search path, set before anything is run. Every command below
+# is invoked unqualified (docker, tar, systemctl, ls, rm ...), so whoever
+# controls PATH controls what those names actually resolve to -- a writable
+# directory earlier in PATH is arbitrary code execution as root, and it
+# defeats the whitelist without touching it. sudo's own env_reset plus a
+# `Defaults secure_path=...` in /etc/sudoers normally strips the caller's
+# PATH before this script starts, but that is a property of the host's
+# sudoers config, not of this script: it can be absent, overridden by a
+# later Defaults line, or bypassed entirely if the script is ever invoked
+# by some other route. Setting it here makes the wrapper self-contained
+# rather than dependent on configuration it does not own.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
 LOG=/var/log/claude-maint.log
 CALLER="$(logname 2>/dev/null || whoami)"
 
@@ -442,6 +455,69 @@ case "$ACTION" in
     do_compose_backup "$proj"
     ;;
 
+  compose-backup-ls)
+    proj="${1:-}"
+    is_allowed_compose_project "$proj" || { echo "refused: unlisted compose project '$proj'" >&2; exit 1; }
+    log "compose-backup-ls $proj"
+    dest="${BACKUP_ROOT}/${proj}"
+    # Same mapfile + discarded-stderr shape the prune in do_compose_backup
+    # uses, so a missing or empty directory is an empty list rather than a
+    # set -e abort.
+    mapfile -t archives < <(ls -1t "${dest}"/*.tar.gz 2>/dev/null)
+    if [[ ${#archives[@]} -eq 0 ]]; then
+      echo "no backups for '$proj' (${dest})"
+      exit 0
+    fi
+    printf '%-24s %6s  %s\n' ARCHIVE SIZE MODIFIED
+    for f in "${archives[@]}"; do
+      printf '%-24s %6s  %s\n' \
+        "$(basename "$f")" \
+        "$(stat -c %s "$f" | numfmt --to=iec)" \
+        "$(stat -c %y "$f" | cut -d. -f1)"
+    done
+    # do_compose_backup writes the new archive first and only then prunes
+    # everything past the newest BACKUP_KEEP, so the next backup removes
+    # (count + 1 - BACKUP_KEEP) of these, never fewer than none.
+    prune=$(( ${#archives[@]} + 1 - BACKUP_KEEP ))
+    if (( prune < 0 )); then prune=0; fi
+    echo
+    echo "${#archives[@]} backup(s), BACKUP_KEEP=${BACKUP_KEEP} — next backup prunes ${prune}"
+    ;;
+
+  compose-backup-rm)
+    proj="${1:-}"
+    is_allowed_compose_project "$proj" || { echo "refused: unlisted compose project '$proj'" >&2; exit 1; }
+    arc="${2:-}"
+    # Anchored against exactly what do_compose_backup's `date +%Y%m%d-%H%M%S`
+    # produces, and matched as a bare basename. Deliberately NOT is_safe_token,
+    # which accepts ".." — "." is in its character class and it does not start
+    # with "-". With this pattern, nothing that reaches the rm below can
+    # traverse out of the project's own backup directory or expand as a glob.
+    if [[ ! "$arc" =~ ^[0-9]{8}-[0-9]{6}\.tar\.gz$ ]]; then
+      echo "refused: bad archive name '$arc' (expected YYYYMMDD-HHMMSS.tar.gz)" >&2
+      log "REFUSED compose-backup-rm $proj (bad archive name)"
+      exit 1
+    fi
+    # Deleting a backup is irreversible, so it takes the same literal
+    # "confirm" the other destructive actions do — last, once the full
+    # target has been named.
+    if [[ "${3:-}" != "confirm" ]]; then
+      echo "refused: compose-backup-rm needs the literal argument 'confirm'" >&2
+      echo "usage: claude-maint compose-backup-rm $proj $arc confirm" >&2
+      log "REFUSED compose-backup-rm $proj $arc (no confirm)"
+      exit 1
+    fi
+    target="${BACKUP_ROOT}/${proj}/${arc}"
+    if [[ ! -f "$target" ]]; then
+      echo "refused: no such backup '$target'" >&2
+      log "REFUSED compose-backup-rm $proj $arc (not found)"
+      exit 1
+    fi
+    log "compose-backup-rm $proj $arc"
+    rm -f -- "$target"
+    echo "deleted: $target"
+    ;;
+
   compose-up)
     proj="${1:-}"
     is_allowed_compose_project "$proj" || { echo "refused: unlisted compose project '$proj'" >&2; exit 1; }
@@ -588,7 +664,7 @@ case "$ACTION" in
 
   *)
     echo "refused: unknown action '$ACTION'" >&2
-    echo "allowed actions: status|restart|logs|disk|ports|auth-log|docker-ps|docker-logs|docker-restart|docker-stats|docker-disk|container-health|container-http-probe|apt-upgrade|cert-expiry|compose-ps|compose-logs|compose-restart|compose-images|compose-config|compose-backup|compose-up|compose-update|ufw-status|fail2ban-status|apparmor-status|mail-queue" >&2
+    echo "allowed actions: status|restart|logs|disk|ports|auth-log|docker-ps|docker-logs|docker-restart|docker-stats|docker-disk|container-health|container-http-probe|apt-upgrade|cert-expiry|compose-ps|compose-logs|compose-restart|compose-images|compose-config|compose-backup|compose-backup-ls|compose-backup-rm|compose-up|compose-update|ufw-status|fail2ban-status|apparmor-status|mail-queue" >&2
     log "REFUSED unknown action: $ACTION $*"
     exit 1
     ;;
