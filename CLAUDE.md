@@ -128,9 +128,29 @@ the remote host.
 4. **Never write secrets to the remote host.** No API keys, tokens, or
    credentials of any kind get created, echoed, or stored on the remote
    host as part of this workflow.
-5. **Prefer small, verifiable steps** over long chained commands — easier
+5. **Never read `.env` — consult `.env.sample` instead.** Do not `cat`,
+   `grep`, `sed`, `head`, open in an editor, or otherwise read the real
+   `.env`, for any reason: not to check a value, not merely to list which
+   keys exist, and not with the values redacted on the way out. It holds
+   every host-specific fact and may hold live API tokens; opening it pulls
+   those into the session transcript, the model's context, and anything
+   derived from them — regardless of what is ultimately printed.
+   Redacting on output is not a substitute for not opening the file.
+
+   `.env.sample` is tracked, carries placeholders only, and is the file to
+   consult for a key's name and meaning.
+
+   Scripts sourcing `.env` is expected and fine — `ssh-lib.sh` does
+   exactly that, which is how every other script reaches the host. The
+   prohibition is on reading the file directly. Pass `$SSH_ALIAS`,
+   `$MAIL_USER`, `$REMOTE_MAINT_PATH` and `$TMUX_SESSION` through as
+   variables and never inspect their values. If a key is missing or empty,
+   the scripts already fail with a clear `... is empty in .env` message —
+   report that message and let the human fix it rather than opening the
+   file to diagnose.
+6. **Prefer small, verifiable steps** over long chained commands — easier
    to review, easier to roll back.
-6. **Summarize, don't narrate every keystroke.** After a task, give a short
+7. **Summarize, don't narrate every keystroke.** After a task, give a short
    summary of what changed and how to verify it, not a transcript.
 
 ## Out of scope
