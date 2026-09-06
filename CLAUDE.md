@@ -148,9 +148,31 @@ the remote host.
    the scripts already fail with a clear `... is empty in .env` message —
    report that message and let the human fix it rather than opening the
    file to diagnose.
-6. **Prefer small, verifiable steps** over long chained commands — easier
+6. **If you read `.env` anyway, report it — loudly, immediately, and
+   unprompted.** A breach of rule 5 is disclosed in the very next reply,
+   at the top, in unmistakable terms. Not buried mid-summary, not softened
+   into passive voice, and never left out on the grounds that the read
+   looked harmless, returned nothing interesting, or was "only to check
+   one key". The user finding out later, by asking, is a second failure on
+   top of the first.
+
+   State plainly: **which file** was read, **the exact command** used, and
+   **what actually appeared in the output**.
+
+   You may add that secret values were masked or never exposed **only when
+   you have explicitly verified it** — by looking at the real output of
+   that specific command and confirming what it printed. Never claim
+   masking because the command was written to redact, because you intended
+   to redact, because a value "shouldn't" have been in that key, or
+   because you did not notice a secret go by. If you have not checked the
+   output, or cannot reconstruct it, say the exposure is **unverified** and
+   treat any secret in that file as potentially exposed.
+
+   The report is not satisfied by an apology, a promise not to repeat it,
+   or a correction buried in a longer answer. Lead with it.
+7. **Prefer small, verifiable steps** over long chained commands — easier
    to review, easier to roll back.
-7. **Summarize, don't narrate every keystroke.** After a task, give a short
+8. **Summarize, don't narrate every keystroke.** After a task, give a short
    summary of what changed and how to verify it, not a transcript.
 
 ## Out of scope
