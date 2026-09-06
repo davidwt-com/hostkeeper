@@ -74,12 +74,12 @@ hostkeeper/
 
 Variables, all consumed by `ssh-lib.sh` and the scripts that source it:
 
-| Var | Meaning |
-|---|---|
-| `SSH_ALIAS` | Host entry in `~/.ssh/config` to connect through |
-| `MAIL_USER` | Remote unix user whose mbox `check.sh`/`check-detailed.sh`/`mark-mail-read.sh` read |
-| `TMUX_SESSION` | Remote tmux session name `connect.sh` attaches/creates |
-| `REMOTE_MAINT_PATH` | Absolute path to the installed wrapper on the remote host |
+| Var                 | Meaning                                                                             |
+| ------------------- | ----------------------------------------------------------------------------------- |
+| `SSH_ALIAS`         | Host entry in `~/.ssh/config` to connect through                                    |
+| `MAIL_USER`         | Remote unix user whose mbox `check.sh`/`check-detailed.sh`/`mark-mail-read.sh` read |
+| `TMUX_SESSION`      | Remote tmux session name `connect.sh` attaches/creates                              |
+| `REMOTE_MAINT_PATH` | Absolute path to the installed wrapper on the remote host                           |
 
 `.env.sample` ships all four keys with **empty values** and a comment above
 each explaining it. Empty is the unambiguous "needs a value" signal
@@ -331,3 +331,20 @@ broke in the move.
   whitelist appear in any tracked (non-gitignored) file.
 - A fresh clone, with no prior `.env`, can reach a working state by
   following the README quickstart alone.
+
+### Status
+
+This design shipped; see the implementation plan for the build itself.
+The criteria above stand as written — three are confirmed, one is not
+testable from a configured checkout and is recorded as unverified rather
+than assumed:
+
+| Criterion                           | Status                                                               |
+| ----------------------------------- | -------------------------------------------------------------------- |
+| `verify-install.sh` passes          | Confirmed — all 10 checks pass against the live target host          |
+| Local scripts driven by `.env`      | Confirmed — in routine daily use, no hardcoded values remain         |
+| No host specifics in tracked files  | Confirmed — every tracked file and all commit messages audited clean |
+| Fresh clone works from README alone | **Not verified** — untestable from an already-configured checkout    |
+
+The last one needs a genuine clean-machine run to close. Don't record it
+as passing on the strength of the other three.
