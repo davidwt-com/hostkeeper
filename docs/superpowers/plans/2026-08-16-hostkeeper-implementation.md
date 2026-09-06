@@ -1,5 +1,21 @@
 # hostkeeper Implementation Plan
 
+> **Status: shipped — do not execute this plan again.** Every task below
+> was implemented and committed. The unchecked `- [ ]` boxes are the plan
+> as originally written, left as-is for the record; they are not an
+> outstanding to-do list.
+>
+> The repo has moved on since. Later pull requests added compose
+> lifecycle, diagnostic, container health/probe, and backup
+> listing/deletion actions to the wrapper, pinned the wrapper's `PATH`,
+> enabled branch protection, and documented the contribution routes. The
+> file drafts embedded further down — the `CLAUDE.md` and `README.md`
+> sections — are point-in-time copies from the day this plan was written
+> and do **not** reflect any of that; the wrapper's action list in
+> particular has grown substantially since. Treat the live `CLAUDE.md`,
+> `README.md`, and `remote/claude-maint.sample` as authoritative, and
+> these embedded drafts as history.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Restructure this folder into hostkeeper — a generic, publishable
