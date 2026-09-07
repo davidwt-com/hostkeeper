@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# NetBird summary line — a worked, netbird-specific instance of
+# check.local.sh.sample. Copy to check.local.sh (gitignored, never
+# committed). Sourced by check.sh and check-detailed.sh at the very end:
+# ssh-lib.sh is already sourced and $REMOTE_MAINT_PATH is already set, so
+# don't `set -e`/`exec` here and don't re-source ssh-lib.sh yourself.
+#
+# Prints one line: how many containers are up, days until the TLS cert
+# expires, how many peers are online, and whether a management update is
+# available. The last two need NETBIRD_API_URL / NETBIRD_API_TOKEN in .env
+# and are skipped without them.
+#
+# For the full report rather than a summary line, see
+# netbird-status.local.sh.sample.
+
+echo
+echo "== netbird summary =="
+
+containers="$(hostkeeper_ssh "sudo $REMOTE_MAINT_PATH compose-ps netbird" | tail -n +2)"
+total="$(printf '%s\n' "$containers" | grep -c .)"
+up="$(printf '%s\n' "$containers" | grep -c 'Up ')"
+
+cert_summary="cert unknown"
+# First data row of the cert table, whatever the domain is called — the
+# header is "DOMAIN  EXPIRES" and rows follow it.
+cert_line="$(hostkeeper_ssh "sudo $REMOTE_MAINT_PATH cert-expiry netbird-traefik" 2>/dev/null \
+  | awk '/^DOMAIN[[:space:]]+EXPIRES/ {f=1; next} f && NF {print; exit}')"
+if [[ -n "$cert_line" ]]; then
+  enddate="$(printf '%s\n' "$cert_line" | awk '{$1=""; print substr($0,2)}')"
+  if secs="$(date -d "$enddate" +%s 2>/dev/null)"; then
+    days=$(( (secs - $(date +%s)) / 86400 ))
+    cert_summary="cert ${days}d"
+  fi
+fi
+
+peers_summary="peers n/a"
+update_summary="update n/a"
+if [[ -n "${NETBIRD_API_TOKEN:-}" && -n "${NETBIRD_API_URL:-}" ]]; then
+  peers_json="$(curl -s -m 5 -H "Authorization: Token $NETBIRD_API_TOKEN" "$NETBIRD_API_URL/api/peers" 2>/dev/null || true)"
+  if [[ -n "$peers_json" ]]; then
+    online="$(printf '%s' "$peers_json" | jq '[.[] | select(.connected==true)] | length' 2>/dev/null)"
+    count="$(printf '%s' "$peers_json" | jq 'length' 2>/dev/null)"
+    [[ -n "$online" && -n "$count" ]] && peers_summary="${online}/${count} peers online"
+  fi
+
+  ver_json="$(curl -s -m 5 -H "Authorization: Token $NETBIRD_API_TOKEN" "$NETBIRD_API_URL/api/instance/version" 2>/dev/null || true)"
+  if [[ -n "$ver_json" ]]; then
+    avail="$(printf '%s' "$ver_json" | jq -r '.management_update_available' 2>/dev/null)"
+    cur="$(printf '%s' "$ver_json" | jq -r '.management_current_version' 2>/dev/null)"
+    new="$(printf '%s' "$ver_json" | jq -r '.management_available_version' 2>/dev/null)"
+    case "$avail" in
+      true)  update_summary="update available (${cur} -> ${new})" ;;
+      false) update_summary="up to date (${cur})" ;;
+    esac
+  fi
+fi
+
+echo "netbird: ${up}/${total} containers up · ${cert_summary} · ${peers_summary} · ${update_summary}"
