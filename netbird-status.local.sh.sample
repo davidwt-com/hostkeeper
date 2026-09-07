@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+# NetBird status and inventory — a worked, netbird-specific instance of
+# service-status.local.sh.sample. Copy to netbird-status.local.sh
+# (gitignored, never committed — the *.local.sh suffix is what keeps it out
+# of git; see .gitignore).
+#
+# Nothing here is host-specific: the project and container names are the
+# ones the official netbird compose stack uses, and the management URL and
+# token come from .env.
+#
+# Needs, in remote/claude-maint:
+#   * `netbird` as a key in COMPOSE_PROJECTS
+#   * netbird-server, netbird-dashboard, netbird-proxy and netbird-traefik
+#     in ALLOWED_CONTAINERS
+# and, in .env:
+#   * NETBIRD_API_URL   — your management server's base URL, no trailing
+#                         slash (e.g. https://netbird.example.com)
+#   * NETBIRD_API_TOKEN — a personal access token created in the dashboard
+#
+# Two families of sections:
+#   host — containers, health, readiness, metrics, logs, cert. Read over SSH
+#          through the claude-maint wrapper.
+#   api  — version, users, peers, groups, networks, policies, dns, keys.
+#          Read from the Management API over HTTPS.
+#
+# Dual mode. Executed directly it prints a report:
+#   ./netbird-status.local.sh [section ...]     (no args = every section)
+# Sourced it prints nothing and just defines the helpers and the show_*
+# functions — that is how netbird-admin.local.sh consumes it.
+#
+# Read-only throughout: every wrapper action used here is a read action and
+# every API call is a GET. Setup-key material is never fetched into the
+# output, and the API token is only ever passed as a header.
+set -euo pipefail
+
+NETBIRD_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${NETBIRD_LIB_DIR}/ssh-lib.sh"
+
+: "${REMOTE_MAINT_PATH:?REMOTE_MAINT_PATH is empty in .env}"
+
+NETBIRD_PROJECT=netbird
+NETBIRD_CONTAINERS=(netbird-server netbird-dashboard netbird-proxy netbird-traefik)
+
+NETBIRD_HOST_SECTIONS=(containers health readiness metrics logs cert)
+NETBIRD_API_SECTIONS=(version users peers groups networks policies dns keys)
+
+# ---------------------------------------------------------------- helpers
+
+# One temp dir per process, created on first use. Guarded because the EXIT
+# trap replaces rather than appends — a second trap elsewhere would leak
+# this one's directory.
+nb_workdir() {
+  [[ -n "${NETBIRD_WORK:-}" ]] && return 0
+  NETBIRD_WORK="$(mktemp -d)"
+  trap 'rm -rf "${NETBIRD_WORK:-}"' EXIT
+}
+
+nb_api_configured() {
+  [[ -n "${NETBIRD_API_URL:-}" && -n "${NETBIRD_API_TOKEN:-}" ]]
+}
+
+# Hard check, for callers (like netbird-admin.local.sh) that cannot do
+# anything useful without the API. The report path uses the soft check above
+# instead, so the host sections still work on a box with no API token.
+nb_require_api() {
+  nb_api_configured && return 0
+  echo "error: NETBIRD_API_URL / NETBIRD_API_TOKEN not set in .env" >&2
+  return 1
+}
+
+nb_require_tools() {
+  local cmd
+  for cmd in "$@"; do
+    command -v "$cmd" >/dev/null || { echo "error: $cmd not found in PATH" >&2; return 1; }
+  done
+}
+
+# GET one API path. Checks the HTTP status so a token/permission problem
+# reads as a token problem instead of confusing jq output downstream.
+nb_get() {
+  local path="$1" body code
+  nb_workdir
+  body="$NETBIRD_WORK/.body"
+  code="$(curl -s -m 15 -o "$body" -w '%{http_code}' \
+    -H "Authorization: Token $NETBIRD_API_TOKEN" \
+    -H 'Accept: application/json' \
+    "$NETBIRD_API_URL$path")" || {
+      echo "error: request failed (network/TLS): $path" >&2; return 1; }
+  if [[ "$code" != 2?? ]]; then
+    echo "error: HTTP $code from $path" >&2
+    return 1
+  fi
+  cat "$body"
+}
+
+# fetch <name> <path> — GET once per process, cached in $NETBIRD_WORK.
+fetch() {
+  local name="$1" path="$2"
+  nb_workdir
+  [[ -s "$NETBIRD_WORK/$name.json" ]] || nb_get "$path" > "$NETBIRD_WORK/$name.json"
+}
+
+# Resources live under each network, so walk every network rather than
+# assuming there is only one.
+fetch_resources() {
+  fetch networks /api/networks
+  [[ -s "$NETBIRD_WORK/resources.json" ]] && return 0
+  : > "$NETBIRD_WORK/resources.ndjson"
+  while IFS=$'\t' read -r id name; do
+    nb_get "/api/networks/$id/resources" \
+      | jq -c --arg net "$name" 'map(. + {network: $net}) | .[]' \
+      >> "$NETBIRD_WORK/resources.ndjson"
+  done < <(jq -r '.[] | [.id, .name] | @tsv' "$NETBIRD_WORK/networks.json")
+  jq -s '.' "$NETBIRD_WORK/resources.ndjson" > "$NETBIRD_WORK/resources.json"
+}
+
+count_of() { jq 'length' "$NETBIRD_WORK/$1.json"; }
+
+section() { echo; echo "== $1 =="; }
+
+nb_maint() { hostkeeper_ssh "sudo $REMOTE_MAINT_PATH $*"; }
+
+# ----------------------------------------------------------- host sections
+
+show_containers() {
+  section "containers"
+  nb_maint compose-ps "$NETBIRD_PROJECT"
+}
+
+show_health() {
+  section "container health (docker HEALTHCHECK, if any)"
+  local c
+  for c in "${NETBIRD_CONTAINERS[@]}"; do
+    printf '%-20s ' "$c"
+    nb_maint container-health "$c"
+  done
+}
+
+show_readiness() {
+  section "netbird-server internal readiness (:9000/health)"
+  nb_maint container-http-probe netbird-server 9000 /health || echo "(unreachable)"
+}
+
+show_metrics() {
+  section "netbird-server metrics (:9090/metrics, filtered)"
+  nb_maint container-http-probe netbird-server 9090 /metrics 2>/dev/null \
+    | grep -E '^(management_|signal_|relay_|netbird_)' | grep -v '_bucket{' | sort \
+    || echo "(no matching series, or unreachable)"
+}
+
+show_logs() {
+  section "recent error/warn log lines (last 200, netbird-server)"
+  nb_maint compose-logs "$NETBIRD_PROJECT" netbird-server 200 \
+    | grep -iE 'error|warn' || echo "(none)"
+}
+
+show_cert() {
+  section "TLS cert expiry"
+  nb_maint cert-expiry netbird-traefik
+}
+
+# ------------------------------------------------------------ api sections
+
+show_version() {
+  fetch version /api/instance/version
+  section "version"
+  # /api/instance/version is the same source the dashboard's own "update
+  # available" banner reads from — no need to compare against GitHub
+  # releases ourselves. The dashboard container's own *current* version
+  # isn't exposed by this API, only the latest one published.
+  jq -r '
+    "management: \(.management_current_version) running, \(.management_available_version) available"
+      + (if .management_update_available then "  <-- UPDATE AVAILABLE" else " (up to date)" end),
+    "dashboard:  \(.dashboard_available_version) available (running version not exposed by this API)"
+  ' "$NETBIRD_WORK/version.json"
+}
+
+show_users() {
+  fetch users /api/users
+  fetch groups /api/groups
+  section "users ($(count_of users))"
+  { echo -e "NAME\tEMAIL\tROLE\tSTATUS\tSERVICE\tBLOCKED\tCURRENT\tISSUED\tIDP\tLAST_LOGIN\tAUTO_GROUPS"
+    jq -r --slurpfile g "$NETBIRD_WORK/groups.json" '
+      (($g[0] // []) | map({(.id): .name}) | add // {}) as $gm
+      | .[] | [ .name, (.email // "-"), .role, .status,
+                (.is_service_user|tostring), (.is_blocked|tostring),
+                (.is_current|tostring), .issued, (.idp_id // "-"),
+                (.last_login // "-"),
+                ((.auto_groups // []) | map($gm[.] // .) | join(",")
+                  | if . == "" then "-" else . end) ] | @tsv' "$NETBIRD_WORK/users.json"
+  } | column -t -s $'\t'
+  echo "(CURRENT marks the account this .env token authenticates as)"
+}
+
+show_peers() {
+  fetch peers /api/peers
+  fetch users /api/users
+  section "peers ($(count_of peers))"
+  { echo -e "NAME\tHOSTNAME\tIP\tOS\tCLIENT\tCONNECTED\tLAST_SEEN\tGROUPS\tOWNER\tSSH\tLOGIN_EXP"
+    jq -r --slurpfile u "$NETBIRD_WORK/users.json" '
+      (($u[0] // []) | map({(.id): .name}) | add // {}) as $um
+      | .[] | [ .name, .hostname, .ip, .os, .version,
+                (.connected|tostring), .last_seen,
+                ((.groups // []) | map(.name) | join(",")),
+                ($um[.user_id] // .user_id // "-"),
+                (.ssh_enabled|tostring), (.login_expiration_enabled|tostring) ] | @tsv' \
+      "$NETBIRD_WORK/peers.json"
+  } | column -t -s $'\t'
+}
+
+show_groups() {
+  fetch groups /api/groups
+  section "groups ($(count_of groups))"
+  { echo -e "NAME\tPEERS\tRESOURCES\tISSUED\tPEER_NAMES"
+    jq -r '.[] | [ .name, (.peers_count|tostring), (.resources_count|tostring), .issued,
+                   ((.peers // []) | map(.name) | join(",")
+                     | if . == "" then "-" else . end) ] | @tsv' "$NETBIRD_WORK/groups.json"
+  } | column -t -s $'\t'
+}
+
+show_networks() {
+  fetch_resources
+  fetch routes /api/routes
+  section "networks ($(count_of networks))"
+  { echo -e "NAME\tDESCRIPTION\tROUTERS\tROUTING_PEERS\tRESOURCES\tPOLICIES"
+    jq -r '.[] | [ .name, (.description // "-"),
+                   ((.routers // []) | length | tostring),
+                   (.routing_peers_count|tostring),
+                   ((.resources // []) | length | tostring),
+                   ((.policies // []) | length | tostring) ] | @tsv' "$NETBIRD_WORK/networks.json"
+  } | column -t -s $'\t'
+
+  echo
+  echo "-- resources ($(count_of resources)) --"
+  { echo -e "NETWORK\tNAME\tTYPE\tADDRESS\tENABLED\tGROUPS"
+    jq -r '.[] | [ .network, .name, .type, .address, (.enabled|tostring),
+                   ((.groups // []) | map(.name) | join(",")
+                     | if . == "" then "(none)" else . end) ] | @tsv' "$NETBIRD_WORK/resources.json"
+  } | column -t -s $'\t'
+
+  echo
+  echo "-- legacy routes ($(count_of routes)) --"
+  # The non-empty branch is unverified: this deployment returns [], so the
+  # field names below were never seen in a real record.
+  jq -r 'if length == 0 then "(none — this deployment uses the networks/resources model)"
+         else .[] | "\(.network_id): \(.network // .domains // "-") via \(.peer // .peer_groups // "-") enabled=\(.enabled)"
+         end' "$NETBIRD_WORK/routes.json"
+}
+
+show_policies() {
+  fetch policies /api/policies
+  fetch_resources
+  section "policies ($(count_of policies))"
+  # A rule targeting a network resource carries destinationResource {id,type}
+  # rather than a populated .destinations, so resolve it against the
+  # resource map instead of printing a raw id.
+  jq -r --slurpfile r "$NETBIRD_WORK/resources.json" '
+    (($r[0] // []) | map({(.id): "\(.name) [\(.address)]"}) | add // {}) as $rm
+    | .[]
+    | "- \(.name)  [enabled=\(.enabled)]"
+      + (if (.description // "") == "" then "" else "\n    \(.description)" end)
+      + ((.rules // []) | map(
+          "\n    rule \(.name): "
+          + ((.sources // []) | map(.name) | join(", ") | if . == "" then "(none)" else . end)
+          + " -> "
+          + (if ((.destinations // []) | length) > 0
+             then ((.destinations) | map(.name) | join(", "))
+             elif (.destinationResource // null) != null
+             then ($rm[.destinationResource.id] // "resource \(.destinationResource.id)")
+             else "(none)" end)
+          + "  proto=\(.protocol) action=\(.action) bidir=\(.bidirectional) enabled=\(.enabled)"
+        ) | join(""))
+  ' "$NETBIRD_WORK/policies.json"
+}
+
+show_dns() {
+  fetch dns /api/dns/nameservers
+  section "nameserver groups ($(count_of dns))"
+  jq -r 'if length == 0 then "(none configured)"
+         else .[] | "- \(.name) enabled=\(.enabled) primary=\(.primary)"
+                  + "  domains=\((.domains // []) | join(",") | if . == "" then "-" else . end)"
+                  + "  ns=\((.nameservers // []) | map("\(.ip):\(.port)") | join(","))"
+                  + "  groups=\((.groups // []) | length)"
+         end' "$NETBIRD_WORK/dns.json"
+}
+
+# Metadata only. The `key` field is deliberately never selected — setup keys
+# are credentials, and this output must stay safe to paste anywhere.
+show_keys() {
+  fetch keys /api/setup-keys
+  fetch groups /api/groups
+  section "setup keys ($(count_of keys)) — metadata only, key material never printed"
+  { echo -e "NAME\tTYPE\tSTATE\tVALID\tREVOKED\tEPHEMERAL\tUSED/LIMIT\tEXPIRES\tLAST_USED\tAUTO_GROUPS"
+    jq -r --slurpfile g "$NETBIRD_WORK/groups.json" '
+      (($g[0] // []) | map({(.id): .name}) | add // {}) as $gm
+      | .[] | [ .name, .type, .state, (.valid|tostring), (.revoked|tostring),
+                (.ephemeral|tostring), "\(.used_times)/\(.usage_limit)",
+                .expires, .last_used,
+                ((.auto_groups // []) | map($gm[.] // .) | join(",")
+                  | if . == "" then "-" else . end) ] | @tsv' "$NETBIRD_WORK/keys.json"
+  } | column -t -s $'\t'
+}
+
+# ------------------------------------------------------------- dispatcher
+
+nb_sections() { echo "${NETBIRD_HOST_SECTIONS[*]} ${NETBIRD_API_SECTIONS[*]}"; }
+
+nb_is_api_section() {
+  local s
+  for s in "${NETBIRD_API_SECTIONS[@]}"; do [[ "$s" == "$1" ]] && return 0; done
+  return 1
+}
+
+# nb_report [section ...] — no args prints every section, host family first.
+nb_report() {
+  local requested=("$@") s
+  if [[ ${#requested[@]} -eq 0 ]]; then
+    requested=("${NETBIRD_HOST_SECTIONS[@]}" "${NETBIRD_API_SECTIONS[@]}")
+  fi
+
+  for s in "${requested[@]}"; do
+    if nb_is_api_section "$s" && ! nb_api_configured; then
+      section "$s"
+      echo "(NETBIRD_API_URL / NETBIRD_API_TOKEN not set in .env — skipping)"
+      continue
+    fi
+    case "$s" in
+      containers) show_containers ;;
+      health)     show_health     ;;
+      readiness)  show_readiness  ;;
+      metrics)    show_metrics    ;;
+      logs)       show_logs       ;;
+      cert)       show_cert       ;;
+      version)    show_version    ;;
+      users)      show_users      ;;
+      peers)      show_peers      ;;
+      groups)     show_groups     ;;
+      networks)   show_networks   ;;
+      policies)   show_policies   ;;
+      dns)        show_dns        ;;
+      keys)       show_keys       ;;
+      *)
+        echo "error: unknown section '$s'" >&2
+        echo "known sections: $(nb_sections)" >&2
+        return 2
+        ;;
+    esac
+  done
+  echo
+}
+
+# Report only when run directly; sourcing this file defines and prints
+# nothing.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  nb_require_tools curl jq column
+  nb_report "$@"
+fi

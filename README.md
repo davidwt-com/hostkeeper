@@ -63,6 +63,7 @@ Code, this warning is the entire control.
 | `remote/claude-maint.sudoers.sample` | Sudoers drop-in template |
 | `remote/install-remote.sh` | One-time, human-run remote bootstrap |
 | `*.local.sh` / `service-status.local.sh.sample` / `service-admin.local.sh.sample` | Your own personal, host/app-specific scripts (gitignored / templates) — e.g. a read-only status/inventory report for something you run, its write-side maintenance companion, or a `check.local.sh` hook `check.sh`/`check-detailed.sh` source if present |
+| `netbird-*.local.sh.sample` | Worked, app-specific versions of the three templates above, for a self-hosted NetBird stack (status report, maintenance companion, summary-line hook) |
 | `CLAUDE.md` | Ground rules for any Claude Code session in this repo |
 | `.claude/settings.json` | Baseline permission allow/deny list |
 

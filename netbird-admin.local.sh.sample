@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# NetBird maintenance tasks — a worked, netbird-specific instance of
+# service-admin.local.sh.sample. Copy to netbird-admin.local.sh (gitignored,
+# never committed — the *.local.sh suffix is what keeps it out of git; see
+# .gitignore), alongside netbird-status.local.sh, which it sources.
+#
+# Sources netbird-status.local.sh, which supplies .env (via ssh-lib.sh), the
+# API helpers (nb_get / fetch / fetch_resources / count_of), the wrapper
+# helper (nb_maint), and every read-only show_* section. That file prints
+# nothing when sourced.
+#
+#   ./netbird-admin.local.sh show [section ...]   read-only report passthrough
+#   ./netbird-admin.local.sh sections             list the section names
+#   ./netbird-admin.local.sh help
+#
+# Maintenance actions land in the marked block below. Ground rules for any
+# action that writes:
+#   * read first — print exactly what will change, using the show_* sections
+#   * require an explicit `confirm` argument; never infer consent from the
+#     fact that the action was invoked
+#   * never create, echo, or store secret material (setup keys, PATs)
+#   * anything needing root on the host goes through nb_maint, i.e. through
+#     the claude-maint wrapper — never a raw sudo
+set -euo pipefail
+
+NETBIRD_ADMIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${NETBIRD_ADMIN_DIR}/netbird-status.local.sh"
+
+nb_require_tools curl jq column
+
+# Not nb_require_api here — `help` and `sections` must work on a box
+# with no API config. Call it at the top of any action that needs the
+# API; nb_report already degrades gracefully without it.
+
+usage() {
+  # The leading comment block, minus the shebang — stops at the first
+  # non-comment line so it can never spill into the code below.
+  awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' \
+    "${BASH_SOURCE[0]}"
+}
+
+# ---------------------------------------------------- maintenance actions
+#
+# (none yet — this is where they go)
+#
+# -------------------------------------------------------------------------
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  show)           nb_report "$@" ;;
+  sections)       nb_sections    ;;
+  help|-h|--help) usage          ;;
+  *)
+    echo "error: unknown command '$cmd'" >&2
+    echo "commands: show, sections, help" >&2
+    exit 2
+    ;;
+esac
