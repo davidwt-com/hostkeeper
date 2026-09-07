@@ -1,55 +1,248 @@
 #!/usr/bin/env bash
-# Example detailed status script for one self-hosted app/compose project.
-# Copy to <yourapp>-status.local.sh (gitignored, never committed — the
-# *.local.sh suffix is what keeps it out of git; see .gitignore) and fill
-# in your own project/container names and API details.
+# Example status/inventory script for one self-hosted app or compose
+# project. Copy to <yourapp>-status.local.sh (gitignored, never committed —
+# the *.local.sh suffix is what keeps it out of git; see .gitignore) and
+# fill in your own project/container names and API details.
 #
-# Run standalone (./<yourapp>-status.local.sh), separately from
-# check.sh/check-detailed.sh — a "how's this one app doing" deep-dive, not
-# part of the routine host snapshot. Add a one-line summary mode of your
-# own (e.g. an --summary flag) if you also want a line for check.local.sh
-# to pull in.
+# Two families of sections:
+#   host — read over SSH through the claude-maint wrapper
+#   api  — read from the app's own token-authed REST API over HTTPS
+# Keep them separate: the wrapper is for root-on-the-host actions only, and
+# an app API call has no business going through SSH.
+#
+# Dual mode:
+#   ./<yourapp>-status.local.sh [section ...]   prints a report
+#                                               (no args = every section)
+#   source ./<yourapp>-status.local.sh          defines the helpers and the
+#                                               show_* functions, prints
+#                                               nothing
+# The sourced mode is what lets a companion maintenance script reuse this
+# one — see service-admin.local.sh.sample.
+#
+# Run it standalone, separately from check.sh/check-detailed.sh — this is a
+# "how's this one app doing" deep-dive, not part of the routine host
+# snapshot. If you also want a line in that snapshot, put it in
+# check.local.sh (see check.local.sh.sample), which both check scripts
+# source at the very end.
+#
+# Safeguards built into this template, worth keeping when you adapt it:
+#   * read-only — every wrapper action used here is a read action and every
+#     API call is a GET
+#   * root only ever via `sudo "$REMOTE_MAINT_PATH" <action>`, never a raw
+#     sudo command composed here
+#   * the API token is only ever passed as a header, never echoed, and no
+#     endpoint that returns credential material is fetched into the output
+#   * no host specifics in this file — project/container names are yours to
+#     fill in, and URL/token live in .env
+#   * missing API config degrades gracefully: the host sections still run
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")"
-source ./ssh-lib.sh
 
-PROJECT=myapp                 # a key in remote/claude-maint's COMPOSE_PROJECTS
-CONTAINER=myapp-server         # a name in remote/claude-maint's ALLOWED_CONTAINERS
+APP_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${APP_LIB_DIR}/ssh-lib.sh"
 
-echo "== $PROJECT: containers =="
-hostkeeper_ssh "sudo $REMOTE_MAINT_PATH compose-ps $PROJECT"
+: "${REMOTE_MAINT_PATH:?REMOTE_MAINT_PATH is empty in .env}"
 
-echo; echo "== $CONTAINER: container-level health =="
-hostkeeper_ssh "sudo $REMOTE_MAINT_PATH container-health $CONTAINER"
+# Fill these in. PROJECT must be a key in remote/claude-maint's
+# COMPOSE_PROJECTS; each container must be in its ALLOWED_CONTAINERS.
+APP_PROJECT=myapp
+APP_SERVICE=myapp-server        # a service *within* the compose project
+APP_CONTAINERS=(myapp-server myapp-proxy)
 
-# If the app exposes its own internal health/metrics endpoint on a port
-# that isn't published to the host (common for anything meant to sit
-# behind a reverse proxy), container-http-probe reaches it directly by the
-# container's docker-network IP. Adjust port/path to match your app.
-echo; echo "== $CONTAINER: internal health endpoint =="
-hostkeeper_ssh "sudo $REMOTE_MAINT_PATH container-http-probe $CONTAINER 9000 /health" || true
+# Rename these two to match whatever you called them in .env (keep the real
+# names out of every tracked file — .env.sample explains the convention).
+APP_API_URL_VAR=APP_API_URL
+APP_API_TOKEN_VAR=APP_API_TOKEN
 
-echo; echo "== $CONTAINER: recent error/warn log lines =="
-hostkeeper_ssh "sudo $REMOTE_MAINT_PATH compose-logs $PROJECT '' 200" | grep -iE 'error|warn' || echo "(none in the last 200 lines)"
+APP_HOST_SECTIONS=(containers health readiness logs cert)
+APP_API_SECTIONS=(version items)
 
-echo; echo "== TLS cert expiry =="
-hostkeeper_ssh "sudo $REMOTE_MAINT_PATH cert-expiry $CONTAINER" || true
+# ---------------------------------------------------------------- helpers
 
-# If your app has its own token-authed REST API (reachable over the
-# public internet, not through SSH), call it directly from here rather
-# than through the wrapper — the wrapper is for root-on-the-host actions
-# only. Keep the URL/token in your local .env, never in this file or any
-# tracked file.
+# One temp dir per process, created on first use. Guarded because an EXIT
+# trap replaces rather than appends — a second trap set by a script that
+# sources this one would otherwise leak this directory.
+app_workdir() {
+  [[ -n "${APP_WORK:-}" ]] && return 0
+  APP_WORK="$(mktemp -d)"
+  trap 'rm -rf "${APP_WORK:-}"' EXIT
+}
+
+app_api_url()   { echo "${!APP_API_URL_VAR:-}"; }
+app_api_token() { echo "${!APP_API_TOKEN_VAR:-}"; }
+
+app_api_configured() {
+  [[ -n "$(app_api_url)" && -n "$(app_api_token)" ]]
+}
+
+# Hard check, for a caller that can't do anything useful without the API.
+# The report path uses the soft check above instead, so the host sections
+# still work on a box where no API token is configured.
+app_require_api() {
+  app_api_configured && return 0
+  echo "error: $APP_API_URL_VAR / $APP_API_TOKEN_VAR not set in .env" >&2
+  return 1
+}
+
+app_require_tools() {
+  local cmd
+  for cmd in "$@"; do
+    command -v "$cmd" >/dev/null || { echo "error: $cmd not found in PATH" >&2; return 1; }
+  done
+}
+
+# GET one API path. Checks the HTTP status so a token or permission problem
+# reads as a token problem instead of confusing jq output downstream — a
+# bare `curl -s | jq` turns a 401 into "no results", which is exactly the
+# wrong story.
+app_get() {
+  local path="$1" body code
+  app_workdir
+  body="$APP_WORK/.body"
+  code="$(curl -s -m 15 -o "$body" -w '%{http_code}' \
+    -H "Authorization: Token $(app_api_token)" \
+    -H 'Accept: application/json' \
+    "$(app_api_url)$path")" || {
+      echo "error: request failed (network/TLS): $path" >&2; return 1; }
+  if [[ "$code" != 2?? ]]; then
+    echo "error: HTTP $code from $path" >&2
+    return 1
+  fi
+  cat "$body"
+}
+
+# app_fetch <name> <path> — GET once per process, cached in $APP_WORK.
+app_fetch() {
+  local name="$1" path="$2"
+  app_workdir
+  [[ -s "$APP_WORK/$name.json" ]] || app_get "$path" > "$APP_WORK/$name.json"
+}
+
+app_count_of() { jq 'length' "$APP_WORK/$1.json"; }
+
+app_section() { echo; echo "== $1 =="; }
+
+# Every root action goes through the wrapper, always by full path, always
+# via sudo. Never compose a raw sudo command here.
 #
-#   : "${MYAPP_API_URL:?MYAPP_API_URL is empty in .env}"
-#   : "${MYAPP_API_TOKEN:?MYAPP_API_TOKEN is empty in .env}"
-#   echo; echo "== $PROJECT: API-reported status =="
-#   curl -s -H "Authorization: Token $MYAPP_API_TOKEN" "$MYAPP_API_URL/api/status"
-#
-# If the app's API has its own version/update-check endpoint (many
-# self-hosted dashboards do -- it's usually the same source their own "an
-# update is available" banner reads from), prefer that over comparing
-# versions against GitHub releases yourself:
-#
-#   echo; echo "== $PROJECT: version / update status =="
-#   curl -s -H "Authorization: Token $MYAPP_API_TOKEN" "$MYAPP_API_URL/api/version" | jq .
+# Note: arguments are flattened into one remote command string, so they are
+# word-split by the remote shell and an empty argument disappears rather
+# than holding its position. Pass every positional explicitly — never ''
+# as a placeholder, or the argument after it slides into the wrong slot.
+app_maint() { hostkeeper_ssh "sudo $REMOTE_MAINT_PATH $*"; }
+
+# ----------------------------------------------------------- host sections
+
+show_containers() {
+  app_section "containers"
+  app_maint compose-ps "$APP_PROJECT"
+}
+
+show_health() {
+  app_section "container health (docker HEALTHCHECK, if any)"
+  local c
+  for c in "${APP_CONTAINERS[@]}"; do
+    printf '%-20s ' "$c"
+    app_maint container-health "$c"
+  done
+}
+
+# If the app exposes a health/metrics endpoint on a port that isn't
+# published to the host (common for anything behind a reverse proxy),
+# container-http-probe reaches it by the container's docker-network IP.
+# Adjust port and path to match your app.
+show_readiness() {
+  app_section "internal readiness endpoint"
+  app_maint container-http-probe "${APP_CONTAINERS[0]}" 9000 /health || echo "(unreachable)"
+}
+
+show_logs() {
+  app_section "recent error/warn log lines (last 200)"
+  app_maint compose-logs "$APP_PROJECT" "$APP_SERVICE" 200 \
+    | grep -iE 'error|warn' || echo "(none)"
+}
+
+show_cert() {
+  app_section "TLS cert expiry"
+  app_maint cert-expiry "${APP_CONTAINERS[0]}" || echo "(no cert store found)"
+}
+
+# ------------------------------------------------------------ api sections
+
+# Many self-hosted apps expose their own version/update endpoint — usually
+# the same source their dashboard's "an update is available" banner reads
+# from. Prefer it over comparing against GitHub releases yourself.
+show_version() {
+  app_fetch version /api/version
+  app_section "version"
+  # Named fields, not a raw dump — same reasoning as show_items below.
+  jq -r '"running:   \(.current_version // "?")",
+         "available: \(.available_version // "?")"' "$APP_WORK/version.json"
+}
+
+# A collection rendered as a table. Two patterns worth copying:
+#   * select fields explicitly rather than dumping raw JSON — it keeps
+#     credential-bearing fields out of the output by construction
+#   * build an id -> name map from a second endpoint and resolve foreign
+#     keys through it, so the table shows names instead of opaque ids
+show_items() {
+  app_fetch items /api/items
+  app_fetch owners /api/owners
+  app_section "items ($(app_count_of items))"
+  { printf 'NAME\tSTATUS\tOWNER\tCREATED\n'
+    jq -r --slurpfile o "$APP_WORK/owners.json" '
+      (($o[0] // []) | map({(.id): .name}) | add // {}) as $om
+      | .[] | [ .name, .status,
+                ($om[.owner_id] // .owner_id // "-"),
+                (.created_at // "-") ] | @tsv' "$APP_WORK/items.json"
+  } | column -t -s $'\t'
+}
+
+# ------------------------------------------------------------- dispatcher
+
+app_sections() { echo "${APP_HOST_SECTIONS[*]} ${APP_API_SECTIONS[*]}"; }
+
+app_is_api_section() {
+  local s
+  for s in "${APP_API_SECTIONS[@]}"; do [[ "$s" == "$1" ]] && return 0; done
+  return 1
+}
+
+# app_report [section ...] — no args prints every section, host family first.
+app_report() {
+  local requested=("$@") s
+  if [[ ${#requested[@]} -eq 0 ]]; then
+    requested=("${APP_HOST_SECTIONS[@]}" "${APP_API_SECTIONS[@]}")
+  fi
+
+  for s in "${requested[@]}"; do
+    if app_is_api_section "$s" && ! app_api_configured; then
+      app_section "$s"
+      echo "($APP_API_URL_VAR / $APP_API_TOKEN_VAR not set in .env — skipping)"
+      continue
+    fi
+    case "$s" in
+      containers) show_containers ;;
+      health)     show_health     ;;
+      readiness)  show_readiness  ;;
+      logs)       show_logs       ;;
+      cert)       show_cert       ;;
+      version)    show_version    ;;
+      items)      show_items      ;;
+      *)
+        echo "error: unknown section '$s'" >&2
+        echo "known sections: $(app_sections)" >&2
+        return 2
+        ;;
+    esac
+  done
+  echo
+}
+
+# Report only when run directly. Sourcing this file defines the functions
+# above and prints nothing — without this guard, sourcing would run the
+# whole report as a side effect.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  app_require_tools curl jq column
+  app_report "$@"
+fi

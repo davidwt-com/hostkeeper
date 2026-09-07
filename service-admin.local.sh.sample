@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Example maintenance script for one self-hosted app or compose project —
+# the write-side companion to service-status.local.sh.sample. Copy to
+# <yourapp>-admin.local.sh (gitignored, never committed — the *.local.sh
+# suffix is what keeps it out of git; see .gitignore).
+#
+# It sources your status script, which supplies .env (via ssh-lib.sh), the
+# API helpers (app_get / app_fetch / app_count_of), the wrapper helper
+# (app_maint), and every read-only show_* section. That file prints nothing
+# when sourced, so this one starts with a clean slate.
+#
+#   ./<yourapp>-admin.local.sh show [section ...]   read-only report
+#   ./<yourapp>-admin.local.sh sections             list the section names
+#   ./<yourapp>-admin.local.sh help
+#
+# Why the split: the status script stays something you can run, pipe, and
+# cron without thinking about it. Everything that can change state lives
+# here, behind an explicit command name.
+#
+# Ground rules for every action you add below — these are the safeguards
+# this template exists to carry, not boilerplate:
+#   * read first. Print exactly what will change, using the show_* sections
+#     you already have, before doing anything.
+#   * require an explicit `confirm` argument. Never infer consent from the
+#     fact that the command was invoked, and never default it to on.
+#   * anything needing root on the host goes through app_maint — i.e.
+#     through the claude-maint wrapper. Never compose a raw sudo command,
+#     and never work around a whitelist: if an action you need isn't in the
+#     wrapper, stop and add it there deliberately.
+#   * never create, echo, or store credential material — API tokens, setup
+#     or enrollment keys, passwords. Not in output, not in a temp file, and
+#     never onto the remote host.
+#   * one action, one thing. Small and verifiable beats a chained script
+#     you can't review or roll back.
+#   * destructive actions (delete, recreate, upgrade, disable) get named
+#     for what they do and are confirmed per run, not per session.
+set -euo pipefail
+
+APP_ADMIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Point this at your own copy of the status script.
+# shellcheck source=/dev/null
+source "${APP_ADMIN_DIR}/myapp-status.local.sh"
+
+app_require_tools curl jq column
+
+# Not app_require_api here — `help` and `sections` must work on a box
+# with no API config. Call it at the top of any action that needs the
+# API; the read-only report already degrades gracefully without it.
+
+usage() {
+  # The leading comment block, minus the shebang — stops at the first
+  # non-comment line so it can never spill into the code below.
+  awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' \
+    "${BASH_SOURCE[0]}"
+}
+
+# ---------------------------------------------------- maintenance actions
+#
+# Add actions here. Sketch of the shape the ground rules above imply — a
+# read-back, then a gate, then the single call that changes something:
+#
+#   cmd_retire_item() {
+#     local name="${1:-}" confirm="${2:-}"
+#     [[ -n "$name" ]] || { echo "usage: retire-item <name> confirm" >&2; return 2; }
+#
+#     # 1. read first — show the caller exactly what is about to change
+#     app_fetch items /api/items
+#     jq -e --arg n "$name" '.[] | select(.name == $n)' "$APP_WORK/items.json" \
+#       || { echo "error: no item named '$name'" >&2; return 1; }
+#
+#     # 2. gate — an explicit token, checked, never defaulted
+#     if [[ "$confirm" != "confirm" ]]; then
+#       echo "refusing: pass 'confirm' as the second argument to actually retire it" >&2
+#       return 2
+#     fi
+#
+#     # 3. act — one call, and report what came back
+#     local id
+#     id="$(jq -r --arg n "$name" '.[] | select(.name == $n) | .id' "$APP_WORK/items.json")"
+#     app_delete "/api/items/$id"   # a DELETE helper you add alongside app_get
+#   }
+#
+# ...and wire it into the dispatcher below:
+#
+#   retire-item) cmd_retire_item "$@" ;;
+#
+# -------------------------------------------------------------------------
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  show)           app_report "$@" ;;
+  sections)       app_sections    ;;
+  help|-h|--help) usage           ;;
+  *)
+    echo "error: unknown command '$cmd'" >&2
+    echo "commands: show, sections, help" >&2
+    exit 2
+    ;;
+esac
